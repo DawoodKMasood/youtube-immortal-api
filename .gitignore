@@ -1,0 +1,5 @@
+uploads/*
+thumbnails/*
+outputs/*
+alembic/__pycache__/*
+alembic/versions/__pycache__/*
