@@ -66,14 +66,16 @@ for directory in [UPLOAD_DIR, OUTPUT_DIR, THUMBNAIL_DIR]:
 # Thread pool for concurrent processing
 executor = ThreadPoolExecutor(max_workers=4)
 
-def get_random_music() -> str:
+def get_random_music(exclude=None):
     music_folder = "musics"
     music_files = [f for f in os.listdir(music_folder) if f.endswith(('.mp3', '.wav'))]
+    if exclude:
+        music_files = [f for f in music_files if f != exclude]
     if not music_files:
-        raise ValueError("No music files found in the 'musics' folder")
+        raise ValueError("No suitable music files found in the 'musics' folder")
     return os.path.join(music_folder, random.choice(music_files))
 
-def process_video(file_path: str, adjusted_path: str, output_path: str, thumbnail_path: str, db: Session, video_id: int):
+def process_video(file_path: str, adjusted_path: str, output_path: str, thumbnail_path: str, db: Session, video_id: int, bg_music_path: str = None, watermark_path: str = None):
     try:
         db_video = db.query(Video).filter(Video.id == video_id).first()
         db_video.status = VideoStatus.PROCESSING
@@ -82,11 +84,7 @@ def process_video(file_path: str, adjusted_path: str, output_path: str, thumbnai
         info = validate_video(file_path)
         adjust_aspect_ratio(file_path, adjusted_path)
         
-        # Apply fade-out effect to the adjusted video
-        faded_path = os.path.join(UPLOAD_DIR, f"faded_{os.path.basename(adjusted_path)}")
-        apply_fade_out(adjusted_path, faded_path)
-        
-        combine_videos(faded_path, output_path)
+        combine_videos(adjusted_path, output_path, bg_music_path, watermark_path)
         generate_thumbnail(file_path, thumbnail_path)
 
         db_video.status = VideoStatus.COMPLETED
@@ -97,30 +95,16 @@ def process_video(file_path: str, adjusted_path: str, output_path: str, thumbnai
         db.commit()
         print(f"Error processing video: {str(e)}")
     finally:
-        for path in [file_path, adjusted_path, faded_path]:
-            if os.path.exists(path):
+        for path in [file_path, adjusted_path, bg_music_path, watermark_path]:
+            if path and os.path.exists(path):
                 os.remove(path)
 
-def apply_fade_out(input_path: str, output_path: str, duration: float = 3.0):
-    probe = ffmpeg.probe(input_path)
-    video_info = next(s for s in probe['streams'] if s['codec_type'] == 'video')
-    total_duration = float(video_info['duration'])
-    start_time = total_duration - duration
-
-    # Create the fade filter
-    video = ffmpeg.input(input_path)
-    video = video.filter('fade', type='out', start_time=start_time, duration=duration)
-    
-    # Apply the filter and output
-    output = ffmpeg.output(video, output_path)
-    ffmpeg.run(output, overwrite_output=True)
-
-def combine_videos(main_video: str, output_path: str):
+def combine_videos(main_video: str, output_path: str, custom_bg_music: str = None, custom_watermark: str = None):
     # Load the input video files
     intro_file = INTRO_VIDEO
     main_file = main_video
     outro_file = OUTRO_VIDEO
-    watermark_file = "WATERMARK.png"
+    watermark_file = custom_watermark or "WATERMARK.png"
 
     # Input streams from video files
     intro = ffmpeg.input(intro_file)
@@ -128,53 +112,71 @@ def combine_videos(main_video: str, output_path: str):
     outro = ffmpeg.input(outro_file)
     watermark = ffmpeg.input(watermark_file)
 
-    # Concatenate video streams (video only, no audio)
-    video = ffmpeg.concat(intro['v'], main['v'], outro['v'], v=1, a=0)
-
-    # Split the watermark into two streams for different scaling
-    watermark_split = watermark.filter_multi_output('split')
-    watermark_top_left = watermark_split[0].filter('scale', w='iw*0.4', h='ih*0.4')
-    watermark_bottom_right = watermark_split[1].filter('scale', w='iw*0.4', h='ih*0.4')
-
-    # Add watermark to the top-left corner
-    video = ffmpeg.filter(
-        [video, watermark_top_left],
-        'overlay',
-        x=10,
-        y=10,
-        enable='between(t,0,30)',
-        alpha=0.25  # Set the transparency to 25%
-    )
-
-    # Add another watermark to the bottom-right corner
-    video = ffmpeg.filter(
-        [video, watermark_bottom_right],
-        'overlay',
-        x='main_w-overlay_w-10',
-        y='main_h-overlay_h-10',
-        enable='between(t,0,30)',
-        alpha=0.25  # Set the transparency to 25%
-    )
-
-    # Get random background music
-    bg_music = ffmpeg.input(get_random_music())
-
-    # Calculate total duration
+    # Get durations for each video segment
     intro_duration = float(ffmpeg.probe(intro_file)['streams'][0]['duration'])
     main_duration = float(ffmpeg.probe(main_file)['streams'][0]['duration'])
     outro_duration = float(ffmpeg.probe(outro_file)['streams'][0]['duration'])
     total_duration = intro_duration + main_duration + outro_duration
 
-    # Apply fade-in and fade-out to background music
-    bg_music = (
-        bg_music
-        .filter('afade', type='in', duration=3)
-        .filter('afade', type='out', start_time=total_duration - 3, duration=3)
-        .filter('volume', volume=0.4)
-        .filter('atrim', duration=total_duration)
+    # Scale and apply watermark to the main video
+    watermark_scaled = watermark.filter('scale', w=200, h=200)
+    main_with_watermark = ffmpeg.filter(
+        [main, watermark_scaled],
+        'overlay',
+        x=10,
+        y=10
     )
 
-    # Concatenate audio streams, creating silent audio if an input does not have audio
+    # Add fade-in and fade-out effects to the main video with watermark
+    fade_duration = 3  # 3 second fade duration
+    main_with_fade = (
+        main_with_watermark
+        .filter('fade', type='in', duration=fade_duration)
+        .filter('fade', type='out', start_time=main_duration-fade_duration, duration=fade_duration)
+    )
+
+    # Concatenate video streams with the faded main video
+    video = ffmpeg.concat(intro['v'], main_with_fade, outro['v'], v=1, a=0)
+
+    # Prepare background music
+    bg_music_tracks = []
+    current_duration = 0
+    fade_duration = 3  # 3 second fade duration for music transitions
+
+    while current_duration < total_duration:
+        if not bg_music_tracks:
+            # Use custom background music for the first track if provided
+            music_file = custom_bg_music if custom_bg_music else get_random_music()
+        else:
+            # Get a random music file, excluding the previously used one
+            music_file = get_random_music(exclude=os.path.basename(bg_music_tracks[-1]))
+
+        music_duration = float(ffmpeg.probe(music_file)['streams'][0]['duration'])
+        
+        bg_music = ffmpeg.input(music_file)
+        
+        if current_duration + music_duration > total_duration:
+            # Trim the last music track to fit the remaining duration
+            bg_music = bg_music.filter('atrim', duration=total_duration - current_duration)
+            music_duration = total_duration - current_duration
+        
+        # Apply fade-in and fade-out
+        bg_music = (
+            bg_music
+            .filter('afade', type='in', duration=fade_duration)
+            .filter('afade', type='out', start_time=music_duration - fade_duration, duration=fade_duration)
+        )
+        
+        bg_music_tracks.append(bg_music)
+        current_duration += music_duration
+
+    # Concatenate all background music tracks
+    concatenated_bg_music = ffmpeg.concat(*bg_music_tracks, v=0, a=1)
+    
+    # Adjust volume of background music
+    bg_music_adjusted = concatenated_bg_music.filter('volume', volume=0.4)
+
+    # Concatenate audio streams from video files, creating silent audio if an input does not have audio
     audio_inputs = []
     for input_file in [intro_file, main_file, outro_file]:
         # Probe to check if audio exists
@@ -191,10 +193,10 @@ def combine_videos(main_video: str, output_path: str):
             audio_inputs.append(silent_audio)
 
     # Concatenate audio streams
-    audio = ffmpeg.concat(*audio_inputs, v=0, a=1)
+    original_audio = ffmpeg.concat(*audio_inputs, v=0, a=1)
 
     # Mix original audio with background music
-    mixed_audio = ffmpeg.filter([audio, bg_music], 'amix', inputs=2)
+    mixed_audio = ffmpeg.filter([original_audio, bg_music_adjusted], 'amix', inputs=2)
 
     # Output final video with mixed audio
     output = ffmpeg.output(video, mixed_audio, output_path)
@@ -263,7 +265,9 @@ async def upload_video(
     account_name: str = Form(...),
     game_mode: str = Form(...),
     weapon: str = Form(...),
-    map_name: str = Form(...)
+    map_name: str = Form(...),
+    background_music: UploadFile = File(None),
+    watermark: UploadFile = File(None)
 ):
     if not file.filename.lower().endswith(('.mp4', '.mov', '.avi')):
         raise HTTPException(status_code=400, detail="Invalid file format. Please upload a video file.")
@@ -276,6 +280,24 @@ async def upload_video(
     adjusted_path = os.path.join(UPLOAD_DIR, f"adjusted_{safe_filename}")
     output_path = os.path.join(OUTPUT_DIR, f"final_{safe_filename}")
     thumbnail_path = os.path.join(THUMBNAIL_DIR, f"{file_uuid}.jpg")
+    
+    # Save custom background music if provided
+    bg_music_path = None
+    if background_music:
+        bg_music_extension = os.path.splitext(background_music.filename)[1]
+        bg_music_filename = f"{file_uuid}_bg{bg_music_extension}"
+        bg_music_path = os.path.join(UPLOAD_DIR, bg_music_filename)
+        with open(bg_music_path, "wb") as buffer:
+            shutil.copyfileobj(background_music.file, buffer)
+    
+    # Save custom watermark if provided
+    watermark_path = None
+    if watermark:
+        watermark_extension = os.path.splitext(watermark.filename)[1]
+        watermark_filename = f"{file_uuid}_watermark{watermark_extension}"
+        watermark_path = os.path.join(UPLOAD_DIR, watermark_filename)
+        with open(watermark_path, "wb") as buffer:
+            shutil.copyfileobj(watermark.file, buffer)
     
     db_video = Video(
         filename=safe_filename,
@@ -300,7 +322,9 @@ async def upload_video(
         output_path,
         thumbnail_path,
         db,
-        db_video.id
+        db_video.id,
+        bg_music_path,
+        watermark_path
     )
     
     return {"task_id": db_video.id, "status": db_video.status}
