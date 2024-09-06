@@ -4,3 +4,4 @@ sqlalchemy
 ffmpeg-python
 python-dotenv
 uvicorn
+psycopg2-binary
