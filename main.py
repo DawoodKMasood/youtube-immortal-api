@@ -18,6 +18,7 @@ from sqlalchemy.ext.declarative import declarative_base
 import ffmpeg
 from dotenv import load_dotenv
 from fastapi.param_functions import Form as FormAlias
+import redis
 
 # Load environment variables from .env file
 load_dotenv()
@@ -27,6 +28,10 @@ SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL")
 engine = create_engine(SQLALCHEMY_DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
+# Redis configuration
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+redis_client = redis.from_url(REDIS_URL)
 
 # Model
 class VideoStatus(str, PyEnum):
@@ -131,11 +136,13 @@ def get_video_info(file_path):
         'fps': float(eval(video_stream['r_frame_rate']))
     }
 
-def process_video(file_path: str, adjusted_path: str, output_path: str, thumbnail_path: str, db: Session, video_id: int, bg_music_path: str = None):
+def process_video_background(file_path: str, adjusted_path: str, output_path: str, thumbnail_path: str, db: Session, video_id: int, bg_music_path: str = None):
     try:
         db_video = db.query(Video).filter(Video.id == video_id).first()
         db_video.status = VideoStatus.PROCESSING
         db.commit()
+
+        redis_client.set(f"video:{video_id}:status", VideoStatus.PROCESSING)
 
         print(f"Starting video processing for video_id: {video_id}")
         print(f"Validating video: {file_path}")
@@ -153,11 +160,17 @@ def process_video(file_path: str, adjusted_path: str, output_path: str, thumbnai
         db_video.status = VideoStatus.COMPLETED
         db_video.thumbnail = os.path.basename(thumbnail_path)
         db.commit()
+
+        redis_client.set(f"video:{video_id}:status", VideoStatus.COMPLETED)
+
         print(f"Video processing completed for video_id: {video_id}")
     except Exception as e:
         print(f"Error processing video {video_id}: {str(e)}")
         db_video.status = VideoStatus.FAILED
         db.commit()
+
+        redis_client.set(f"video:{video_id}:status", VideoStatus.FAILED)
+
         raise
     finally:
         for path in [file_path, adjusted_path, bg_music_path]:
@@ -292,10 +305,9 @@ def generate_thumbnail(input_path, output_path):
         .run(capture_stdout=True, capture_stderr=True)
     )
 
-# ... (other imports and code remain the same)
-
 @app.post("/upload/")
 async def upload_video(
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     file: UploadFile = File(...),
     account_name: str = Form(...),
@@ -343,41 +355,21 @@ async def upload_video(
     
     print(f"Video file saved: {file_path}, Size: {os.path.getsize(file_path)} bytes")
     
-    try:
-        process_video(file_path, adjusted_path, output_path, thumbnail_path, db, db_video.id, bg_music_path)
-        
-        db_video.status = VideoStatus.COMPLETED
-        db_video.thumbnail = os.path.basename(thumbnail_path)
-        db.commit()
-        
-        return {"video_id": db_video.id, "status": VideoStatus.COMPLETED}
-    except Exception as e:
-        db_video.status = VideoStatus.FAILED
-        db.commit()
-        
-        error_traceback = traceback.format_exc()
-        
-        print(f"Error occurred during video processing:\n{error_traceback}")
-        
-        error_detail = {
-            "message": "Video processing failed",
-            "error": str(e),
-            "traceback": error_traceback,
-            "file_info": {
-                "original_filename": file.filename,
-                "saved_filename": safe_filename,
-                "file_path": file_path,
-                "adjusted_path": adjusted_path,
-                "output_path": output_path,
-                "thumbnail_path": thumbnail_path
-            }
-        }
-        
-        raise HTTPException(status_code=500, detail=error_detail)
-    finally:
-        for path in [file_path, adjusted_path, bg_music_path]:
-            if path and os.path.exists(path):
-                os.remove(path)
+    background_tasks.add_task(process_video_background, file_path, adjusted_path, output_path, thumbnail_path, db, db_video.id, bg_music_path)
+    
+    return {"video_id": db_video.id, "status": VideoStatus.PENDING}
+
+@app.get("/video/{video_id}/status")
+async def get_video_status(video_id: int, db: Session = Depends(get_db)):
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if video is None:
+        raise HTTPException(status_code=404, detail="Video not found")
+    
+    redis_status = redis_client.get(f"video:{video_id}:status")
+    if redis_status:
+        return {"status": redis_status.decode()}
+    else:
+        return {"status": video.status}
 
 @app.get("/videos")
 def list_videos(db: Session = Depends(get_db)):
@@ -477,6 +469,13 @@ async def health_check(db: Session = Depends(get_db)):
         else:
             health_status["status"] = "unhealthy"
             health_status["checks"][file_name] = "missing"
+
+    try:
+        redis_client.ping()
+        health_status["checks"]["redis"] = "connected"
+    except Exception as e:
+        health_status["status"] = "unhealthy"
+        health_status["checks"]["redis"] = f"error: {str(e)}"
 
     # For Render: Always return a 200 OK status
     # Include detailed health information in the response body
