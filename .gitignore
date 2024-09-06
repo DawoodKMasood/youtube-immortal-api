@@ -3,3 +3,5 @@ thumbnails/*
 outputs/*
 alembic/__pycache__/*
 alembic/versions/__pycache__/*
+alembic.ini
+.env

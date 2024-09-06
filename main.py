@@ -14,9 +14,13 @@ from sqlalchemy import create_engine, Column, Integer, String, DateTime, Enum
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.ext.declarative import declarative_base
 import ffmpeg
+from dotenv import load_dotenv
 
-# Database setup
-SQLALCHEMY_DATABASE_URL = "postgresql://immortal_youtube_api_user:rxbFTa4Er7gIDR1Y4j4dTbrwP3c3QXfr@dpg-crd0t688fa8c73bfoqgg-a.oregon-postgres.render.com/immortal_youtube_api"
+# Load environment variables from .env file
+load_dotenv()
+
+# Get the database URL from the environment variable
+SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL")
 engine = create_engine(SQLALCHEMY_DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
