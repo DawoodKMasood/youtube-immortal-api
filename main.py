@@ -362,7 +362,6 @@ async def upload_video(
                 "original_filename": file.filename,
                 "saved_filename": safe_filename,
                 "file_path": file_path,
-                "file_size": os.path.getsize(file_path) if os.path.exists(file_path) else "File not found",
                 "adjusted_path": adjusted_path,
                 "output_path": output_path,
                 "thumbnail_path": thumbnail_path
