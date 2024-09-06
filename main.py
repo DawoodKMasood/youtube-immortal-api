@@ -10,7 +10,7 @@ from typing import List
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Form, BackgroundTasks, Header
 from fastapi.responses import FileResponse
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Enum
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Enum, text
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.ext.declarative import declarative_base
 import ffmpeg
@@ -394,7 +394,7 @@ async def health_check(db: Session = Depends(get_db)):
 
     try:
         # Check database connection
-        db.execute("SELECT 1")
+        db.execute(text("SELECT 1"))
         health_status["checks"]["database"] = "connected"
     except Exception as e:
         health_status["status"] = "unhealthy"
@@ -404,19 +404,19 @@ async def health_check(db: Session = Depends(get_db)):
     required_dirs = [UPLOAD_DIR, OUTPUT_DIR, THUMBNAIL_DIR]
     for dir_name in required_dirs:
         if os.path.exists(dir_name) and os.path.isdir(dir_name):
-            health_status["checks"][f"directory_{dir_name}"] = "exists"
+            health_status["checks"][f"{dir_name}"] = "exists"
         else:
             health_status["status"] = "unhealthy"
-            health_status["checks"][f"directory_{dir_name}"] = "missing"
+            health_status["checks"][f"{dir_name}"] = "missing"
 
     # Check for required files
     required_files = [INTRO_VIDEO, OUTRO_VIDEO, WATERMARK]
     for file_name in required_files:
         if os.path.exists(file_name) and os.path.isfile(file_name):
-            health_status["checks"][f"file_{file_name}"] = "exists"
+            health_status["checks"][f"{file_name}"] = "exists"
         else:
             health_status["status"] = "unhealthy"
-            health_status["checks"][f"file_{file_name}"] = "missing"
+            health_status["checks"][f"{file_name}"] = "missing"
 
     if health_status["status"] == "unhealthy":
         raise HTTPException(status_code=503, detail=health_status)
