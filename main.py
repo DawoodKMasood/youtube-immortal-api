@@ -330,19 +330,6 @@ def list_videos(db: Session = Depends(get_db)):
         "updated_at": video.updated_at
     } for video in videos]
 
-@app.get("/video/{video_id}/status")
-def get_video_status(video_id: int, db: Session = Depends(get_db)):
-    video = db.query(Video).filter(Video.id == video_id).first()
-    if video is None:
-        raise HTTPException(status_code=404, detail="Video not found")
-    
-    return {
-        "id": video.id,
-        "status": video.status,
-        "created_at": video.created_at,
-        "updated_at": video.updated_at
-    }
-
 @app.get("/video/{video_id}/thumbnail")
 async def get_thumbnail(video_id: int, db: Session = Depends(get_db)):
     video = db.query(Video).filter(Video.id == video_id).first()
