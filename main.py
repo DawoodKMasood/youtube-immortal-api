@@ -7,7 +7,7 @@ import secrets
 from enum import Enum as PyEnum
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
-from typing import List
+from typing import List, Union
 import subprocess
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Form, BackgroundTasks, Header
@@ -17,6 +17,7 @@ from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.ext.declarative import declarative_base
 import ffmpeg
 from dotenv import load_dotenv
+from fastapi.param_functions import Form as FormAlias
 
 # Load environment variables from .env file
 load_dotenv()
@@ -291,9 +292,6 @@ def generate_thumbnail(input_path, output_path):
         .run(capture_stdout=True, capture_stderr=True)
     )
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Form, BackgroundTasks, Header
-from typing import Optional
-
 # ... (other imports and code remain the same)
 
 @app.post("/upload/")
@@ -304,7 +302,7 @@ async def upload_video(
     game_mode: str = Form(...),
     weapon: str = Form(...),
     map_name: str = Form(...),
-    background_music: Optional[UploadFile] = File(None),
+    background_music: Union[UploadFile, str, None] = FormAlias(default=None),
 ):
     if not file.filename.lower().endswith(('.mp4')):
         raise HTTPException(status_code=400, detail="Invalid file format. Please upload a video file.")
@@ -319,12 +317,14 @@ async def upload_video(
     thumbnail_path = os.path.join(THUMBNAIL_DIR, f"{file_uuid}.jpg")
     
     bg_music_path = None
-    if background_music:
+    if background_music and isinstance(background_music, UploadFile):
         bg_music_extension = os.path.splitext(background_music.filename)[1]
         bg_music_filename = f"{file_uuid}_bg{bg_music_extension}"
         bg_music_path = os.path.join(UPLOAD_DIR, bg_music_filename)
         with open(bg_music_path, "wb") as buffer:
             buffer.write(await background_music.read())
+    elif background_music:
+        print(f"Received background_music as non-UploadFile: {background_music}")
     
     db_video = Video(
         filename=safe_filename,
