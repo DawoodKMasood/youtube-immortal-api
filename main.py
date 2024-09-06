@@ -416,19 +416,6 @@ async def health_check(db: Session = Depends(get_db)):
             health_status["status"] = "unhealthy"
             health_status["checks"][f"file_{file_name}"] = "missing"
 
-    # Check disk space
-    try:
-        total, used, free = shutil.disk_usage("/")
-        free_space_gb = free // (2**30)
-        if free_space_gb < 1:  # Less than 1 GB free
-            health_status["status"] = "unhealthy"
-            health_status["checks"]["disk_space"] = f"low: {free_space_gb} GB free"
-        else:
-            health_status["checks"]["disk_space"] = f"{free_space_gb} GB free"
-    except Exception as e:
-        health_status["status"] = "unhealthy"
-        health_status["checks"]["disk_space"] = f"error: {str(e)}"
-
     if health_status["status"] == "unhealthy":
         raise HTTPException(status_code=503, detail=health_status)
 
