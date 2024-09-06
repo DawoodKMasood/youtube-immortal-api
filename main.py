@@ -1,6 +1,7 @@
 import os
 import random
 import shutil
+import traceback
 import uuid
 import secrets
 from enum import Enum as PyEnum
@@ -309,7 +310,19 @@ async def upload_video(
         # Update the video status to FAILED if an error occurs
         db_video.status = VideoStatus.FAILED
         db.commit()
-        raise HTTPException(status_code=500, detail=f"Video processing failed: {str(e)}")
+        
+        # Get the full traceback
+        error_traceback = traceback.format_exc()
+        
+        # Log the full traceback (you might want to use a proper logging system here)
+        print(f"Error occurred during video processing:\n{error_traceback}")
+        
+        # Raise an HTTPException with both the error message and the traceback
+        raise HTTPException(status_code=500, detail={
+            "message": "Video processing failed",
+            "error": str(e),
+            "traceback": error_traceback
+        })
     finally:
         # Clean up temporary files
         for path in [file_path, adjusted_path, bg_music_path]:
