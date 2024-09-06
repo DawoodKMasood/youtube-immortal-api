@@ -78,6 +78,13 @@ for directory in [UPLOAD_DIR, OUTPUT_DIR, THUMBNAIL_DIR]:
 # Thread pool for concurrent processing
 executor = ThreadPoolExecutor(max_workers=4)
 
+def check_and_set_permissions(directories):
+       for dir in directories:
+           if not os.path.exists(dir):
+               os.makedirs(dir, exist_ok=True)
+           os.chmod(dir, 0o755)  # rwxr-xr-x
+           print(f"Permissions set for {dir}")
+
 def check_ffmpeg():
     try:
         result = subprocess.run(['ffmpeg', '-version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -153,8 +160,12 @@ def process_video(file_path: str, adjusted_path: str, output_path: str, thumbnai
         raise
     finally:
         for path in [file_path, adjusted_path, bg_music_path]:
-            if path and os.path.exists(path):
-                os.remove(path)
+               if path and os.path.exists(path):
+                   try:
+                       os.remove(path)
+                       print(f"Removed temporary file: {path}")
+                   except Exception as e:
+                       print(f"Error removing file {path}: {str(e)}")
 
 def combine_videos(main_video: str, output_path: str, custom_bg_music: str = None):
     intro_file = INTRO_VIDEO
@@ -264,7 +275,7 @@ def adjust_aspect_ratio(input_path, output_path):
     stream = ffmpeg.output(video, input_stream.audio, output_path) if audio_stream else ffmpeg.output(video, output_path)
     
     try:
-        ffmpeg.run(stream, overwrite_output=True, capture_stdout=True, capture_stderr=True)
+        ffmpeg.run(stream, overwrite_output=True, capture_stdout=True, capture_stderr=True, cmd='ffmpeg -v debug')
     except ffmpeg.Error as e:
         print(f"FFmpeg stderr:\n{e.stderr.decode()}")
         raise
@@ -472,6 +483,10 @@ async def startup_event():
     if not check_ffmpeg():
         print("Warning: FFmpeg is not installed or not accessible. Video processing may fail.")
 
+@app.on_event("startup")
+async def startup_event():
+    check_and_set_permissions([UPLOAD_DIR, OUTPUT_DIR, THUMBNAIL_DIR])
+    
 port = int(os.environ.get("PORT", 8000))
 
 if __name__ == "__main__":
