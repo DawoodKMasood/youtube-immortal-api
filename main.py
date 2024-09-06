@@ -64,6 +64,7 @@ OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
 THUMBNAIL_DIR = os.path.join(BASE_DIR, "thumbnails")
 INTRO_VIDEO = os.path.join(BASE_DIR, "INTRO.mp4")
 OUTRO_VIDEO = os.path.join(BASE_DIR, "OUTRO.mp4")
+WATERMARK = os.path.join(BASE_DIR, "WATERMARK.png")
 
 for directory in [UPLOAD_DIR, OUTPUT_DIR, THUMBNAIL_DIR]:
     os.makedirs(directory, exist_ok=True)
@@ -130,7 +131,7 @@ def combine_videos(main_video: str, output_path: str, custom_bg_music: str = Non
     intro_file = INTRO_VIDEO
     main_file = main_video
     outro_file = OUTRO_VIDEO
-    watermark_file = "WATERMARK.png"
+    watermark_file = WATERMARK
 
     main_info = ffmpeg.probe(main_file)
     main_video_stream = next((stream for stream in main_info['streams'] if stream['codec_type'] == 'video'), None)
@@ -409,7 +410,7 @@ async def health_check(db: Session = Depends(get_db)):
             health_status["checks"][f"directory_{dir_name}"] = "missing"
 
     # Check for required files
-    required_files = [INTRO_VIDEO, OUTRO_VIDEO, "WATERMARK.png"]
+    required_files = [INTRO_VIDEO, OUTRO_VIDEO, WATERMARK]
     for file_name in required_files:
         if os.path.exists(file_name) and os.path.isfile(file_name):
             health_status["checks"][f"file_{file_name}"] = "exists"
