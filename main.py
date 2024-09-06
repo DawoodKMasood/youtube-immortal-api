@@ -58,10 +58,11 @@ def get_db():
 
 app = FastAPI()
 
-BASE_DIR = "/var/data"
+BASE_DIR = "/mnt/data"
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
 THUMBNAIL_DIR = os.path.join(BASE_DIR, "thumbnails")
+MUSIC_DIR = os.path.join(BASE_DIR, "musics")
 INTRO_VIDEO = os.path.join(BASE_DIR, "INTRO.mp4")
 OUTRO_VIDEO = os.path.join(BASE_DIR, "OUTRO.mp4")
 WATERMARK = os.path.join(BASE_DIR, "WATERMARK.png")
@@ -73,7 +74,7 @@ for directory in [UPLOAD_DIR, OUTPUT_DIR, THUMBNAIL_DIR]:
 executor = ThreadPoolExecutor(max_workers=4)
 
 def get_random_music(exclude=None):
-    music_folder = "musics"
+    music_folder = MUSIC_DIR
     music_files = [f for f in os.listdir(music_folder) if f.endswith(('.mp3', '.wav'))]
     if exclude:
         music_files = [f for f in music_files if f != exclude]
@@ -401,7 +402,7 @@ async def health_check(db: Session = Depends(get_db)):
         health_status["checks"]["database"] = f"error: {str(e)}"
 
     # Check required directories
-    required_dirs = [UPLOAD_DIR, OUTPUT_DIR, THUMBNAIL_DIR]
+    required_dirs = [UPLOAD_DIR, OUTPUT_DIR, THUMBNAIL_DIR, MUSIC_DIR]
     for dir_name in required_dirs:
         if os.path.exists(dir_name) and os.path.isdir(dir_name):
             health_status["checks"][dir_name] = "exists"
