@@ -3,13 +3,10 @@ import random
 import shutil
 import uuid
 import secrets
-import time
-import psutil
-import logging
 from enum import Enum as PyEnum
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Tuple
+from typing import List
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Form, BackgroundTasks, Header
 from fastapi.responses import FileResponse
@@ -21,16 +18,6 @@ from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Constants for resource management
-MAX_CPU_PERCENT = 80
-MAX_MEMORY_PERCENT = 80
-CHUNK_DURATION = 30  # Process 30 seconds at a time
-MAX_PROCESSING_TIME = 540  # 9 minutes (leaving buffer for 10-minute timeout)
 
 # Get the database URL from the environment variable
 SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL")
@@ -47,19 +34,12 @@ class VideoStatus(str, PyEnum):
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
 
-class ProcessingStage(str, PyEnum):
-    VALIDATE = "validate"
-    ADJUST = "adjust"
-    COMBINE = "combine"
-    THUMBNAIL = "thumbnail"
-
 class Video(Base):
     __tablename__ = "videos"
 
     id = Column(Integer, primary_key=True, index=True)
     filename = Column(String, index=True)
     status = Column(Enum(VideoStatus), default=VideoStatus.PENDING)
-    current_stage = Column(Enum(ProcessingStage))
     account_name = Column(String)
     game_mode = Column(String)
     weapon = Column(String)
@@ -67,7 +47,6 @@ class Video(Base):
     thumbnail = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    current_stage = Column(Enum(ProcessingStage), nullable=True)
 
 # Dependency
 def get_db():
@@ -96,19 +75,6 @@ for directory in [UPLOAD_DIR, OUTPUT_DIR, THUMBNAIL_DIR]:
 
 # Thread pool for concurrent processing
 executor = ThreadPoolExecutor(max_workers=4)
-
-def get_resource_usage() -> Tuple[float, float]:
-    cpu_percent = psutil.cpu_percent(interval=1)
-    memory_percent = psutil.virtual_memory().percent
-    return cpu_percent, memory_percent
-
-def log_resource_usage():
-    cpu_percent, memory_percent = get_resource_usage()
-    logger.info(f"CPU Usage: {cpu_percent}%, Memory Usage: {memory_percent}%")
-
-def check_resources() -> bool:
-    cpu_percent, memory_percent = get_resource_usage()
-    return cpu_percent < MAX_CPU_PERCENT and memory_percent < MAX_MEMORY_PERCENT
 
 def get_random_music(exclude=None):
     music_folder = MUSIC_DIR
@@ -142,150 +108,120 @@ def get_video_info(file_path):
         'fps': float(eval(video_stream['r_frame_rate']))
     }
 
-def process_video(db: Session, video_id: int, background_tasks: BackgroundTasks):
-    video = db.query(Video).filter(Video.id == video_id).first()
-    if not video:
-        raise HTTPException(status_code=404, detail="Video not found")
-
-    video.status = VideoStatus.PROCESSING
-    db.commit()
-
-    file_path = os.path.join(UPLOAD_DIR, video.filename)
-    adjusted_path = os.path.join(UPLOAD_DIR, f"adjusted_{video.filename}")
-    output_path = os.path.join(OUTPUT_DIR, f"final_{video.filename}")
-    thumbnail_path = os.path.join(THUMBNAIL_DIR, f"{video.id}.jpg")
-
+def process_video(file_path: str, adjusted_path: str, output_path: str, thumbnail_path: str, db: Session, video_id: int, bg_music_path: str = None):
     try:
-        stages = [
-            (ProcessingStage.VALIDATE, lambda: validate_video(file_path)),
-            (ProcessingStage.ADJUST, lambda: adjust_aspect_ratio(file_path, adjusted_path)),
-            (ProcessingStage.COMBINE, lambda: combine_videos(adjusted_path, output_path)),
-            (ProcessingStage.THUMBNAIL, lambda: generate_thumbnail(file_path, thumbnail_path))
-        ]
-
-        for stage, process_func in stages:
-            if not process_stage(db, video, stage, process_func):
-                # If a stage couldn't complete, requeue the task
-                background_tasks.add_task(process_video, db, video_id, background_tasks)
-                return
-
-        video.status = VideoStatus.COMPLETED
-        video.thumbnail = os.path.basename(thumbnail_path)
+        db_video = db.query(Video).filter(Video.id == video_id).first()
+        db_video.status = VideoStatus.PROCESSING
         db.commit()
-        logger.info(f"Video processing completed for video_id: {video_id}")
 
+        validate_video(file_path)
+        adjust_aspect_ratio(file_path, adjusted_path)
+        combine_videos(adjusted_path, output_path, bg_music_path)
+        generate_thumbnail(file_path, thumbnail_path)
+
+        db_video.status = VideoStatus.COMPLETED
+        db_video.thumbnail = os.path.basename(thumbnail_path)
+        db.commit()
     except Exception as e:
-        logger.error(f"Error processing video {video_id}: {str(e)}")
-        video.status = VideoStatus.FAILED
+        db_video.status = VideoStatus.FAILED
         db.commit()
+        raise
     finally:
-        for path in [file_path, adjusted_path]:
+        for path in [file_path, adjusted_path, bg_music_path]:
             if path and os.path.exists(path):
                 os.remove(path)
 
-def process_stage(db: Session, video: Video, stage: ProcessingStage, process_func: callable) -> bool:
-    start_time = time.time()
-    video.current_stage = stage
-    db.commit()
-
-    while True:
-        if not check_resources():
-            logger.warning(f"Insufficient resources. Pausing processing of video {video.id}")
-            time.sleep(60)  # Wait for a minute before checking resources again
-            continue
-
-        try:
-            process_func()
-            return True
-        except Exception as e:
-            logger.error(f"Error in {stage} stage for video {video.id}: {str(e)}")
-            if time.time() - start_time > MAX_PROCESSING_TIME:
-                logger.warning(f"Processing time exceeded for video {video.id} in {stage} stage")
-                return False
-            time.sleep(30)  # Wait for 30 seconds before retrying
-
 def combine_videos(main_video: str, output_path: str, custom_bg_music: str = None):
-    logger.info(f"Combining videos: {main_video} -> {output_path}")
     intro_file = INTRO_VIDEO
+    main_file = main_video
     outro_file = OUTRO_VIDEO
     watermark_file = WATERMARK
 
-    video_duration = get_video_duration(main_video)
-    chunk_paths = []
-
-    for start_time in range(0, int(video_duration), CHUNK_DURATION):
-        chunk_output = f"{output_path}.chunk_{start_time}.mp4"
-        process_video_chunk(main_video, chunk_output, start_time, CHUNK_DURATION)
-        chunk_paths.append(chunk_output)
-
-    # Combine all chunks
-    with open('chunk_list.txt', 'w') as f:
-        for chunk_path in chunk_paths:
-            f.write(f"file '{chunk_path}'\n")
-
-    (
-        ffmpeg
-        .input('chunk_list.txt', format='concat', safe=0)
-        .output(output_path, codec='copy')
-        .overwrite_output()
-        .run(capture_stdout=True, capture_stderr=True)
-    )
-
-    # Clean up chunk files
-    for chunk_path in chunk_paths:
-        os.remove(chunk_path)
-    os.remove('chunk_list.txt')
-
-    # Add intro, outro, watermark, and background music
-    add_intro_outro_watermark(output_path, intro_file, outro_file, watermark_file)
-    if custom_bg_music:
-        add_background_music(output_path, custom_bg_music)
-
-def process_video_chunk(input_path: str, output_path: str, start_time: float, duration: float):
-    (
-        ffmpeg
-        .input(input_path, ss=start_time, t=duration)
-        .output(output_path, codec='libx264')
-        .overwrite_output()
-        .run(capture_stdout=True, capture_stderr=True)
-    )
-
-def get_video_duration(file_path: str) -> float:
-    probe = ffmpeg.probe(file_path)
-    video_info = next(s for s in probe['streams'] if s['codec_type'] == 'video')
-    return float(video_info['duration'])
-
-def add_intro_outro_watermark(video_path: str, intro_path: str, outro_path: str, watermark_path: str):
-    temp_output = f"{video_path}.temp.mp4"
+    main_info = ffmpeg.probe(main_file)
+    main_video_stream = next((stream for stream in main_info['streams'] if stream['codec_type'] == 'video'), None)
+    if main_video_stream is None:
+        raise ValueError(f"No video stream found in {main_file}")
     
-    main = ffmpeg.input(video_path)
-    intro = ffmpeg.input(intro_path)
-    outro = ffmpeg.input(outro_path)
-    watermark = ffmpeg.input(watermark_path)
+    fps = eval(main_video_stream['r_frame_rate'])
+
+    intro = ffmpeg.input(intro_file)
+    main = ffmpeg.input(main_file)
+    outro = ffmpeg.input(outro_file)
+    watermark = ffmpeg.input(watermark_file)
+
+    intro_duration = float(ffmpeg.probe(intro_file)['streams'][0]['duration'])
+    main_duration = float(main_info['streams'][0]['duration'])
+    outro_duration = float(ffmpeg.probe(outro_file)['streams'][0]['duration'])
+    total_duration = intro_duration + main_duration + outro_duration
 
     watermark_scaled = watermark.filter('scale', w=200, h=200)
     main_with_watermark = ffmpeg.overlay(main, watermark_scaled, x=10, y=10)
 
-    video = ffmpeg.concat(intro, main_with_watermark, outro)
-    
-    output = ffmpeg.output(video, temp_output)
-    ffmpeg.run(output, overwrite_output=True)
-    
-    os.replace(temp_output, video_path)
-
-def add_background_music(video_path: str, music_path: str):
-    logger.info(f"Adding background music to {video_path}")
-    temp_output = f"{video_path}.with_music.mp4"
-    (
-        ffmpeg
-        .input(video_path)
-        .audio
-        .filter('volume', volume=0.5)
-        .output(temp_output, audio=ffmpeg.input(music_path).audio.filter('volume', volume=0.5))
-        .overwrite_output()
-        .run(capture_stdout=True, capture_stderr=True)
+    fade_duration = 2
+    main_with_fade = (
+        main_with_watermark
+        .filter('fade', type='in', duration=fade_duration)
+        .filter('fade', type='out', start_time=main_duration-fade_duration, duration=fade_duration)
     )
-    os.replace(temp_output, video_path)
+
+    video = ffmpeg.concat(intro['v'], main_with_fade, outro['v'], v=1, a=0)
+
+    bg_music_files = []
+    current_duration = 0
+    fade_duration = 2
+    last_music_file = None
+
+    while current_duration < total_duration:
+        if not bg_music_files and custom_bg_music:
+            music_file = custom_bg_music
+        else:
+            music_file = get_random_music(exclude=last_music_file)
+        
+        music_duration = float(ffmpeg.probe(music_file)['streams'][0]['duration'])
+        
+        if current_duration + music_duration > total_duration:
+            music_duration = total_duration - current_duration
+        
+        bg_music_files.append((music_file, music_duration))
+        current_duration += music_duration
+        last_music_file = music_file
+
+    bg_music_tracks = []
+    for music_file, duration in bg_music_files:
+        bg_music = ffmpeg.input(music_file)
+        segment_fade_duration = min(fade_duration, duration / 2)
+        bg_music = (
+            bg_music
+            .filter('atrim', duration=duration)
+            .filter('afade', type='in', duration=segment_fade_duration)
+            .filter('afade', type='out', start_time=max(0, duration-segment_fade_duration), duration=segment_fade_duration)
+        )
+        bg_music_tracks.append(bg_music)
+
+    if bg_music_tracks:
+        concatenated_bg_music = ffmpeg.concat(*bg_music_tracks, v=0, a=1)
+        bg_music_adjusted = concatenated_bg_music.filter('volume', volume=0.5)
+    else:
+        bg_music_adjusted = ffmpeg.input('anullsrc=r=44100:cl=stereo', f='lavfi', t=total_duration)
+
+    audio_inputs = []
+    for input_file in [intro_file, main_file, outro_file]:
+        audio_streams = ffmpeg.probe(input_file)['streams']
+        audio_stream = next((stream for stream in audio_streams if stream['codec_type'] == 'audio'), None)
+        
+        if audio_stream:
+            audio_inputs.append(ffmpeg.input(input_file)['a'])
+        else:
+            silent_duration = float(ffmpeg.probe(input_file)['streams'][0]['duration'])
+            silent_audio = ffmpeg.input('anullsrc=r=44100:cl=stereo', f='lavfi', t=silent_duration)
+            audio_inputs.append(silent_audio)
+
+    original_audio = ffmpeg.concat(*audio_inputs, v=0, a=1)
+
+    mixed_audio = ffmpeg.filter([original_audio, bg_music_adjusted], 'amix', inputs=2)
+
+    output = ffmpeg.output(video, mixed_audio, output_path, format='mp4', r=fps)
+    ffmpeg.run(output, overwrite_output=True)
 
 def is_landscape(width, height, rotation):
     if rotation in [90, 270]:
@@ -333,6 +269,9 @@ async def upload_video(
     safe_filename = f"{file_uuid}{file_extension}"
     
     file_path = os.path.join(UPLOAD_DIR, safe_filename)
+    adjusted_path = os.path.join(UPLOAD_DIR, f"adjusted_{safe_filename}")
+    output_path = os.path.join(OUTPUT_DIR, f"final_{safe_filename}")
+    thumbnail_path = os.path.join(THUMBNAIL_DIR, f"{file_uuid}.jpg")
     
     bg_music_path = None
     if background_music:
@@ -357,7 +296,17 @@ async def upload_video(
     with open(file_path, "wb") as buffer:
         buffer.write(await file.read())
     
-    background_tasks.add_task(process_video, db, db_video.id, background_tasks)
+    background_tasks.add_task(
+        executor.submit,
+        process_video,
+        file_path,
+        adjusted_path,
+        output_path,
+        thumbnail_path,
+        db,
+        db_video.id,
+        bg_music_path
+    )
     
     return {"task_id": db_video.id, "status": db_video.status}
 
@@ -384,7 +333,6 @@ def get_video_status(video_id: int, db: Session = Depends(get_db)):
     return {
         "id": video.id,
         "status": video.status,
-        "current_stage": video.current_stage,
         "created_at": video.created_at,
         "updated_at": video.updated_at
     }
@@ -434,7 +382,7 @@ async def reset_database(db: Session = Depends(get_db), admin_password: str = He
                     elif os.path.isdir(file_path):
                         shutil.rmtree(file_path)
                 except Exception as e:
-                    logger.error(f'Failed to delete {file_path}. Reason: {e}')
+                    print(f'Failed to delete {file_path}. Reason: {e}')
 
         return {"message": "Database reset successful. All video records and files have been deleted."}
     except Exception as e:
@@ -474,17 +422,12 @@ async def health_check(db: Session = Depends(get_db)):
             health_status["status"] = "unhealthy"
             health_status["checks"][file_name] = "missing"
 
-    # Check system resources
-    cpu_percent, memory_percent = get_resource_usage()
-    health_status["checks"]["cpu_usage"] = f"{cpu_percent}%"
-    health_status["checks"]["memory_usage"] = f"{memory_percent}%"
-
-    if cpu_percent > MAX_CPU_PERCENT or memory_percent > MAX_MEMORY_PERCENT:
-        health_status["status"] = "warning"
-
+    # For Render: Always return a 200 OK status
+    # Include detailed health information in the response body
     return health_status
+
+port = int(os.environ.get("PORT", 8000))
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
