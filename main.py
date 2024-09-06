@@ -252,7 +252,6 @@ def generate_thumbnail(input_path, output_path):
 
 @app.post("/upload/")
 async def upload_video(
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     file: UploadFile = File(...),
     account_name: str = Form(...),
@@ -269,9 +268,6 @@ async def upload_video(
     safe_filename = f"{file_uuid}{file_extension}"
     
     file_path = os.path.join(UPLOAD_DIR, safe_filename)
-    adjusted_path = os.path.join(UPLOAD_DIR, f"adjusted_{safe_filename}")
-    output_path = os.path.join(OUTPUT_DIR, f"final_{safe_filename}")
-    thumbnail_path = os.path.join(THUMBNAIL_DIR, f"{file_uuid}.jpg")
     
     bg_music_path = None
     if background_music:
@@ -296,19 +292,7 @@ async def upload_video(
     with open(file_path, "wb") as buffer:
         buffer.write(await file.read())
     
-    background_tasks.add_task(
-        executor.submit,
-        process_video,
-        file_path,
-        adjusted_path,
-        output_path,
-        thumbnail_path,
-        db,
-        db_video.id,
-        bg_music_path
-    )
-    
-    return {"task_id": db_video.id, "status": db_video.status}
+    return {"video_id": db_video.id, "status": db_video.status}
 
 @app.get("/videos")
 def list_videos(db: Session = Depends(get_db)):
