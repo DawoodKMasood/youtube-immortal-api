@@ -384,12 +384,55 @@ async def reset_database(db: Session = Depends(get_db), admin_password: str = He
         raise HTTPException(status_code=500, detail=f"An error occurred while resetting the database: {str(e)}")
 
 @app.get("/health")
-async def health_check():
+async def health_check(db: Session = Depends(get_db)):
+    health_status = {
+        "status": "healthy",
+        "checks": {}
+    }
+
     try:
-        # You can add more checks here, e.g., database connection
-        return {"status": "healthy", "message": "Service is running"}
+        # Check database connection
+        db.execute("SELECT 1")
+        health_status["checks"]["database"] = "connected"
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Service is unhealthy: {str(e)}")
+        health_status["status"] = "unhealthy"
+        health_status["checks"]["database"] = f"error: {str(e)}"
+
+    # Check required directories
+    required_dirs = [UPLOAD_DIR, OUTPUT_DIR, THUMBNAIL_DIR]
+    for dir_name in required_dirs:
+        if os.path.exists(dir_name) and os.path.isdir(dir_name):
+            health_status["checks"][f"directory_{dir_name}"] = "exists"
+        else:
+            health_status["status"] = "unhealthy"
+            health_status["checks"][f"directory_{dir_name}"] = "missing"
+
+    # Check for required files
+    required_files = [INTRO_VIDEO, OUTRO_VIDEO, "WATERMARK.png"]
+    for file_name in required_files:
+        if os.path.exists(file_name) and os.path.isfile(file_name):
+            health_status["checks"][f"file_{file_name}"] = "exists"
+        else:
+            health_status["status"] = "unhealthy"
+            health_status["checks"][f"file_{file_name}"] = "missing"
+
+    # Check disk space
+    try:
+        total, used, free = shutil.disk_usage("/")
+        free_space_gb = free // (2**30)
+        if free_space_gb < 1:  # Less than 1 GB free
+            health_status["status"] = "unhealthy"
+            health_status["checks"]["disk_space"] = f"low: {free_space_gb} GB free"
+        else:
+            health_status["checks"]["disk_space"] = f"{free_space_gb} GB free"
+    except Exception as e:
+        health_status["status"] = "unhealthy"
+        health_status["checks"]["disk_space"] = f"error: {str(e)}"
+
+    if health_status["status"] == "unhealthy":
+        raise HTTPException(status_code=503, detail=health_status)
+
+    return health_status
 
 port = int(os.environ.get("PORT", 8000))
 
