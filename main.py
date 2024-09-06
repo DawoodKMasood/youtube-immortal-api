@@ -291,6 +291,11 @@ def generate_thumbnail(input_path, output_path):
         .run(capture_stdout=True, capture_stderr=True)
     )
 
+from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Form, BackgroundTasks, Header
+from typing import Optional
+
+# ... (other imports and code remain the same)
+
 @app.post("/upload/")
 async def upload_video(
     db: Session = Depends(get_db),
@@ -299,7 +304,7 @@ async def upload_video(
     game_mode: str = Form(...),
     weapon: str = Form(...),
     map_name: str = Form(...),
-    background_music: UploadFile = File(None),
+    background_music: Optional[UploadFile] = File(None),
 ):
     if not file.filename.lower().endswith(('.mp4')):
         raise HTTPException(status_code=400, detail="Invalid file format. Please upload a video file.")
