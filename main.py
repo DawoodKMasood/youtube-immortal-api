@@ -268,6 +268,9 @@ async def upload_video(
     safe_filename = f"{file_uuid}{file_extension}"
     
     file_path = os.path.join(UPLOAD_DIR, safe_filename)
+    adjusted_path = os.path.join(UPLOAD_DIR, f"adjusted_{safe_filename}")
+    output_path = os.path.join(OUTPUT_DIR, f"final_{safe_filename}")
+    thumbnail_path = os.path.join(THUMBNAIL_DIR, f"{file_uuid}.jpg")
     
     bg_music_path = None
     if background_music:
@@ -292,7 +295,26 @@ async def upload_video(
     with open(file_path, "wb") as buffer:
         buffer.write(await file.read())
     
-    return {"video_id": db_video.id, "status": db_video.status}
+    try:
+        # Process the video immediately
+        process_video(file_path, adjusted_path, output_path, thumbnail_path, db, db_video.id, bg_music_path)
+        
+        # Update the video status to COMPLETED
+        db_video.status = VideoStatus.COMPLETED
+        db_video.thumbnail = os.path.basename(thumbnail_path)
+        db.commit()
+        
+        return {"video_id": db_video.id, "status": VideoStatus.COMPLETED}
+    except Exception as e:
+        # Update the video status to FAILED if an error occurs
+        db_video.status = VideoStatus.FAILED
+        db.commit()
+        raise HTTPException(status_code=500, detail=f"Video processing failed: {str(e)}")
+    finally:
+        # Clean up temporary files
+        for path in [file_path, adjusted_path, bg_music_path]:
+            if path and os.path.exists(path):
+                os.remove(path)
 
 @app.get("/videos")
 def list_videos(db: Session = Depends(get_db)):
