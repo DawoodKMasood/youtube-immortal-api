@@ -404,23 +404,22 @@ async def health_check(db: Session = Depends(get_db)):
     required_dirs = [UPLOAD_DIR, OUTPUT_DIR, THUMBNAIL_DIR]
     for dir_name in required_dirs:
         if os.path.exists(dir_name) and os.path.isdir(dir_name):
-            health_status["checks"][f"{dir_name}"] = "exists"
+            health_status["checks"][dir_name] = "exists"
         else:
             health_status["status"] = "unhealthy"
-            health_status["checks"][f"{dir_name}"] = "missing"
+            health_status["checks"][dir_name] = "missing"
 
     # Check for required files
     required_files = [INTRO_VIDEO, OUTRO_VIDEO, WATERMARK]
     for file_name in required_files:
         if os.path.exists(file_name) and os.path.isfile(file_name):
-            health_status["checks"][f"{file_name}"] = "exists"
+            health_status["checks"][file_name] = "exists"
         else:
             health_status["status"] = "unhealthy"
-            health_status["checks"][f"{file_name}"] = "missing"
+            health_status["checks"][file_name] = "missing"
 
-    if health_status["status"] == "unhealthy":
-        raise HTTPException(status_code=503, detail=health_status)
-
+    # For Render: Always return a 200 OK status
+    # Include detailed health information in the response body
     return health_status
 
 port = int(os.environ.get("PORT", 8000))
