@@ -61,7 +61,7 @@ def get_db():
 app = FastAPI()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_BASE_DIR = "/mnt/data" # For Render | For Windows: os.path.dirname(os.path.abspath(__file__))
+UPLOAD_BASE_DIR = os.path.dirname(os.path.abspath(__file__)) # For Render | For Windows: os.path.dirname(os.path.abspath(__file__))
 
 UPLOAD_DIR = os.path.join(UPLOAD_BASE_DIR, "uploads")
 OUTPUT_DIR = os.path.join(UPLOAD_BASE_DIR, "outputs")
