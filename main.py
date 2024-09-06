@@ -8,6 +8,7 @@ from enum import Enum as PyEnum
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from typing import List
+import subprocess
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Form, BackgroundTasks, Header
 from fastapi.responses import FileResponse
@@ -77,6 +78,19 @@ for directory in [UPLOAD_DIR, OUTPUT_DIR, THUMBNAIL_DIR]:
 # Thread pool for concurrent processing
 executor = ThreadPoolExecutor(max_workers=4)
 
+def check_ffmpeg():
+    try:
+        result = subprocess.run(['ffmpeg', '-version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if result.returncode == 0:
+            print(f"FFmpeg is installed. Version info:\n{result.stdout}")
+            return True
+        else:
+            print(f"FFmpeg check failed. Error:\n{result.stderr}")
+            return False
+    except Exception as e:
+        print(f"Error checking FFmpeg: {str(e)}")
+        return False
+    
 def get_random_music(exclude=None):
     music_folder = MUSIC_DIR
     music_files = [f for f in os.listdir(music_folder) if f.endswith(('.mp3', '.wav'))]
@@ -115,15 +129,25 @@ def process_video(file_path: str, adjusted_path: str, output_path: str, thumbnai
         db_video.status = VideoStatus.PROCESSING
         db.commit()
 
+        print(f"Starting video processing for video_id: {video_id}")
+        print(f"Validating video: {file_path}")
         validate_video(file_path)
+        
+        print(f"Adjusting aspect ratio: {file_path} -> {adjusted_path}")
         adjust_aspect_ratio(file_path, adjusted_path)
+        
+        print(f"Combining videos: {adjusted_path} -> {output_path}")
         combine_videos(adjusted_path, output_path, bg_music_path)
+        
+        print(f"Generating thumbnail: {file_path} -> {thumbnail_path}")
         generate_thumbnail(file_path, thumbnail_path)
 
         db_video.status = VideoStatus.COMPLETED
         db_video.thumbnail = os.path.basename(thumbnail_path)
         db.commit()
+        print(f"Video processing completed for video_id: {video_id}")
     except Exception as e:
+        print(f"Error processing video {video_id}: {str(e)}")
         db_video.status = VideoStatus.FAILED
         db.commit()
         raise
@@ -238,7 +262,12 @@ def adjust_aspect_ratio(input_path, output_path):
     video = video.filter('crop', w='1920', h='1080')
     
     stream = ffmpeg.output(video, input_stream.audio, output_path) if audio_stream else ffmpeg.output(video, output_path)
-    ffmpeg.run(stream, overwrite_output=True)
+    
+    try:
+        ffmpeg.run(stream, overwrite_output=True, capture_stdout=True, capture_stderr=True)
+    except ffmpeg.Error as e:
+        print(f"FFmpeg stderr:\n{e.stderr.decode()}")
+        raise
 
 def generate_thumbnail(input_path, output_path):
     duration = float(ffmpeg.probe(input_path)['streams'][0]['duration'])
@@ -296,35 +325,41 @@ async def upload_video(
     with open(file_path, "wb") as buffer:
         buffer.write(await file.read())
     
+    print(f"Video file saved: {file_path}, Size: {os.path.getsize(file_path)} bytes")
+    
     try:
-        # Process the video immediately
         process_video(file_path, adjusted_path, output_path, thumbnail_path, db, db_video.id, bg_music_path)
         
-        # Update the video status to COMPLETED
         db_video.status = VideoStatus.COMPLETED
         db_video.thumbnail = os.path.basename(thumbnail_path)
         db.commit()
         
         return {"video_id": db_video.id, "status": VideoStatus.COMPLETED}
     except Exception as e:
-        # Update the video status to FAILED if an error occurs
         db_video.status = VideoStatus.FAILED
         db.commit()
         
-        # Get the full traceback
         error_traceback = traceback.format_exc()
         
-        # Log the full traceback (you might want to use a proper logging system here)
         print(f"Error occurred during video processing:\n{error_traceback}")
         
-        # Raise an HTTPException with both the error message and the traceback
-        raise HTTPException(status_code=500, detail={
+        error_detail = {
             "message": "Video processing failed",
             "error": str(e),
-            "traceback": error_traceback
-        })
+            "traceback": error_traceback,
+            "file_info": {
+                "original_filename": file.filename,
+                "saved_filename": safe_filename,
+                "file_path": file_path,
+                "file_size": os.path.getsize(file_path) if os.path.exists(file_path) else "File not found",
+                "adjusted_path": adjusted_path,
+                "output_path": output_path,
+                "thumbnail_path": thumbnail_path
+            }
+        }
+        
+        raise HTTPException(status_code=500, detail=error_detail)
     finally:
-        # Clean up temporary files
         for path in [file_path, adjusted_path, bg_music_path]:
             if path and os.path.exists(path):
                 os.remove(path)
@@ -431,6 +466,11 @@ async def health_check(db: Session = Depends(get_db)):
     # For Render: Always return a 200 OK status
     # Include detailed health information in the response body
     return health_status
+
+@app.on_event("startup")
+async def startup_event():
+    if not check_ffmpeg():
+        print("Warning: FFmpeg is not installed or not accessible. Video processing may fail.")
 
 port = int(os.environ.get("PORT", 8000))
 
