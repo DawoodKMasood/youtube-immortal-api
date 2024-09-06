@@ -59,9 +59,12 @@ def get_db():
 app = FastAPI()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
-OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
-THUMBNAIL_DIR = os.path.join(BASE_DIR, "thumbnails")
+UPLOAD_BASE_DIR = "/mnt/data"
+
+UPLOAD_DIR = os.path.join(UPLOAD_BASE_DIR, "uploads")
+OUTPUT_DIR = os.path.join(UPLOAD_BASE_DIR, "outputs")
+THUMBNAIL_DIR = os.path.join(UPLOAD_BASE_DIR, "thumbnails")
+
 MUSIC_DIR = os.path.join(BASE_DIR, "musics")
 INTRO_VIDEO = os.path.join(BASE_DIR, "INTRO.mp4")
 OUTRO_VIDEO = os.path.join(BASE_DIR, "OUTRO.mp4")
