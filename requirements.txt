@@ -1,0 +1,6 @@
+fastapi
+python-multipart
+sqlalchemy
+ffmpeg-python
+python-dotenv
+uvicorn

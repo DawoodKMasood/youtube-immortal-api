@@ -383,6 +383,14 @@ async def reset_database(db: Session = Depends(get_db), admin_password: str = He
         db.rollback()
         raise HTTPException(status_code=500, detail=f"An error occurred while resetting the database: {str(e)}")
 
+@app.get("/health")
+async def health_check():
+    try:
+        # You can add more checks here, e.g., database connection
+        return {"status": "healthy", "message": "Service is running"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Service is unhealthy: {str(e)}")
+    
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
