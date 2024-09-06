@@ -275,7 +275,7 @@ def adjust_aspect_ratio(input_path, output_path):
     stream = ffmpeg.output(video, input_stream.audio, output_path) if audio_stream else ffmpeg.output(video, output_path)
     
     try:
-        ffmpeg.run(stream, overwrite_output=True, capture_stdout=True, capture_stderr=True, cmd='ffmpeg -v debug')
+        ffmpeg.run(stream, overwrite_output=True, capture_stdout=True, capture_stderr=True)
     except ffmpeg.Error as e:
         print(f"FFmpeg stderr:\n{e.stderr.decode()}")
         raise
