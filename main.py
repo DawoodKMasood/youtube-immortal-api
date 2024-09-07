@@ -21,6 +21,7 @@ from sqlalchemy.ext.declarative import declarative_base
 import ffmpeg
 from dotenv import load_dotenv
 from fastapi.param_functions import Form as FormAlias
+from fastapi.middleware.cors import CORSMiddleware
 import redis
 
 # Load environment variables from .env file
@@ -69,6 +70,14 @@ def get_db():
         db.close()
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "https://immortals-cod-api.playwox.com"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_BASE_DIR = os.path.dirname(os.path.abspath(__file__)) # For Render | For Windows: os.path.dirname(os.path.abspath(__file__))
