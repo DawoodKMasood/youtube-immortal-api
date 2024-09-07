@@ -475,16 +475,10 @@ def adjust_aspect_ratio(input_path, output_path):
 
     # Scale the video
     video = (
-        input_stream.video
+        input_stream
         .filter('scale', w=new_width, h=new_height)
         .filter('pad', w=pad_width, h=pad_height, x='(ow-iw)/2', y='(oh-ih)/2')
     )
-
-    # Prepare the audio stream if it exists
-    if audio_stream:
-        audio = input_stream.audio
-    else:
-        audio = None
 
     # Prepare the output stream
     output_params = {
@@ -494,7 +488,10 @@ def adjust_aspect_ratio(input_path, output_path):
         'acodec': 'aac',
     }
     
-    output = ffmpeg.output(video, audio, output_path, **output_params)
+    if audio_stream:
+        output = ffmpeg.output(video, input_stream.audio, output_path, **output_params)
+    else:
+        output = ffmpeg.output(video, output_path, **output_params)
     
     try:
         ffmpeg.run(output, overwrite_output=True, capture_stdout=True, capture_stderr=True)
