@@ -538,19 +538,16 @@ async def upload_chunk(
     game_mode: str = Form(...),
     weapon: str = Form(...),
     map_name: str = Form(...),
-    background_music: Union[UploadFile, str, None] = Form(default=None),
+    background_music: UploadFile = File(default=None),
     db: Session = Depends(get_db)
 ):
     chunk_dir = os.path.join(UPLOAD_DIR, "chunks")
     os.makedirs(chunk_dir, exist_ok=True)
     
     if chunk_number == 1:
-        # Generate a unique filename for the first chunk
         unique_filename = generate_unique_filename(filename)
-        # Store the unique filename in Redis for this upload session
         redis_client.setex(f"upload:{filename}", 3600, unique_filename)
     else:
-        # Retrieve the unique filename for subsequent chunks
         unique_filename = redis_client.get(f"upload:{filename}")
         if not unique_filename:
             raise HTTPException(status_code=400, detail="Upload session expired or invalid")
@@ -587,13 +584,11 @@ async def upload_chunk(
         
         print(f"All chunks combined into {final_path}")
         
-        # Clean up Redis key
         redis_client.delete(f"upload:{filename}")
         
-        # Process background music if provided
         bg_music_filename = None
         if isinstance(background_music, UploadFile):
-            print("Processing background music")
+            print(f"Processing background music: {background_music.filename}")
             bg_music_path = save_upload_file_tmp(background_music)
             bg_music_uuid = uuid.uuid4()
             bg_music_extension = os.path.splitext(background_music.filename)[1]
@@ -601,15 +596,15 @@ async def upload_chunk(
             final_bg_music_path = os.path.join(MUSIC_DIR, bg_music_filename)
             shutil.move(bg_music_path, final_bg_music_path)
             print(f"Background music saved to {final_bg_music_path}")
+        else:
+            print("No background music provided")
         
-        # Validate file integrity
         if not validate_file_integrity(final_path):
             os.remove(final_path)
             raise HTTPException(status_code=400, detail="The uploaded file appears to be corrupt or incomplete. Please try uploading again.")
         
         print("File integrity validated")
         
-        # Create database entry
         db_video = Video(
             filename=final_filename,
             status=VideoStatus.PENDING,
@@ -625,7 +620,6 @@ async def upload_chunk(
         
         print(f"Database entry created for video ID: {db_video.id}")
         
-        # Enqueue video for processing
         enqueue_video(db_video.id)
         clean_queue()
         queue_position = get_queue_position(db_video.id)
