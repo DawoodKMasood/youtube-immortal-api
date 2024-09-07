@@ -224,8 +224,6 @@ def get_random_music(exclude=None):
 
 def validate_video(file_path):
     info = get_video_info(file_path)
-    if not is_landscape(info['width'], info['height'], info['rotation']):
-        raise ValueError("Video must be in landscape orientation")
     if info['fps'] < 30:
         raise ValueError("Video frame rate must be at least 30 FPS")
     return info
@@ -439,30 +437,57 @@ def is_landscape(width, height, rotation):
 
 def adjust_aspect_ratio(input_path, output_path):
     probe = ffmpeg.probe(input_path)
+    video_stream = next((stream for stream in probe['streams'] if stream['codec_type'] == 'video'), None)
     audio_stream = next((stream for stream in probe['streams'] if stream['codec_type'] == 'audio'), None)
     
-    input_stream = ffmpeg.input(input_path)
-    video = input_stream.video.filter('scale', w='iw*min(1920/iw,1080/ih)', h='ih*min(1920/iw,1080/ih)')
-    video = video.filter('crop', w='1920', h='1080')
+    if not video_stream:
+        raise ValueError("No video stream found in the input file")
+
+    width = int(video_stream['width'])
+    height = int(video_stream['height'])
     
-    stream = ffmpeg.output(video, input_stream.audio, output_path) if audio_stream else ffmpeg.output(video, output_path)
+    input_stream = ffmpeg.input(input_path)
+    
+    # Calculate scaling and padding
+    if width / height > 16 / 9:  # If wider than 16:9
+        new_height = min(1080, height)
+        new_width = new_height * 16 // 9
+        pad_width = new_width
+        pad_height = new_height
+    else:  # If taller than 16:9 or exactly 16:9
+        new_width = min(1920, width)
+        new_height = new_width * 9 // 16
+        pad_width = new_width
+        pad_height = new_height
+
+    # Scale the video
+    video = (
+        input_stream.video
+        .filter('scale', w=new_width, h=new_height)
+        .filter('pad', w=pad_width, h=pad_height, x='(ow-iw)/2', y='(oh-ih)/2')
+    )
+
+    # Prepare the audio stream if it exists
+    if audio_stream:
+        audio = input_stream.audio
+    else:
+        audio = None
+
+    # Prepare the output stream
+    output_params = {
+        'vcodec': 'libx264',
+        'preset': 'medium',
+        'crf': '23',
+        'acodec': 'aac',
+    }
+    
+    output = ffmpeg.output(video, audio, output_path, **output_params)
     
     try:
-        # Use subprocess directly for more control
-        process = subprocess.Popen(
-            ffmpeg.compile(stream),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        stdout, stderr = process.communicate(timeout=3600)  # 1 hour timeout
-        
-        if process.returncode != 0:
-            print(f"FFmpeg stderr:\n{stderr.decode()}")
-            raise Exception(f"FFmpeg command failed with error code {process.returncode}")
-        
-    except subprocess.TimeoutExpired:
-        process.kill()
-        raise Exception("FFmpeg process timed out after 1 hour")
+        ffmpeg.run(output, overwrite_output=True, capture_stdout=True, capture_stderr=True)
+    except ffmpeg.Error as e:
+        print(f"FFmpeg stderr:\n{e.stderr.decode()}")
+        raise Exception(f"FFmpeg command failed: {e.stderr.decode()}")
     except Exception as e:
         print(f"Error in adjust_aspect_ratio: {str(e)}")
         raise
