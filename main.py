@@ -542,42 +542,56 @@ async def upload_chunk(
     chunk_dir = os.path.join(UPLOAD_DIR, "chunks")
     os.makedirs(chunk_dir, exist_ok=True)
     
-    file_uuid = str(uuid.uuid4())
+    file_uuid = filename.split('.')[0]  # Use the filename (without extension) as the UUID
     chunk_filename = f"{file_uuid}_{chunk_number}"
     chunk_path = os.path.join(chunk_dir, chunk_filename)
+    
+    print(f"Receiving chunk {chunk_number} of {total_chunks} for file {filename}")
     
     with open(chunk_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
     
+    print(f"Saved chunk {chunk_number} to {chunk_path}")
+    
     if chunk_number == total_chunks:
+        print(f"All chunks received for {filename}. Combining chunks...")
         # All chunks received, combine them
-        final_filename = f"{file_uuid}_{filename}"
+        final_filename = f"{file_uuid}.mp4"
         final_path = os.path.join(UPLOAD_DIR, final_filename)
         
         with open(final_path, "wb") as final_file:
             for i in range(1, total_chunks + 1):
                 chunk_file = os.path.join(chunk_dir, f"{file_uuid}_{i}")
                 if os.path.exists(chunk_file):
+                    print(f"Appending chunk {i} to final file")
                     with open(chunk_file, "rb") as cf:
                         shutil.copyfileobj(cf, final_file)
                     os.remove(chunk_file)
+                    print(f"Removed chunk file {chunk_file}")
                 else:
+                    print(f"Error: Chunk file {i} is missing")
                     raise HTTPException(status_code=400, detail=f"Chunk file {i} is missing")
+        
+        print(f"All chunks combined into {final_path}")
         
         # Process background music if provided
         bg_music_filename = None
         if isinstance(background_music, UploadFile):
+            print("Processing background music")
             bg_music_path = save_upload_file_tmp(background_music)
             bg_music_uuid = uuid.uuid4()
             bg_music_extension = os.path.splitext(background_music.filename)[1]
             bg_music_filename = f"{bg_music_uuid}{bg_music_extension}"
             final_bg_music_path = os.path.join(MUSIC_DIR, bg_music_filename)
             shutil.move(bg_music_path, final_bg_music_path)
+            print(f"Background music saved to {final_bg_music_path}")
         
         # Validate file integrity
         if not validate_file_integrity(final_path):
             os.remove(final_path)
             raise HTTPException(status_code=400, detail="The uploaded file appears to be corrupt or incomplete. Please try uploading again.")
+        
+        print("File integrity validated")
         
         # Create database entry
         db_video = Video(
@@ -593,6 +607,8 @@ async def upload_chunk(
         db.commit()
         db.refresh(db_video)
         
+        print(f"Database entry created for video ID: {db_video.id}")
+        
         # Enqueue video for processing
         enqueue_video(db_video.id)
         clean_queue()
@@ -602,6 +618,8 @@ async def upload_chunk(
             "status": VideoStatus.PENDING,
             "queue_position": queue_position
         }))
+        
+        print(f"Video enqueued for processing. Queue position: {queue_position}")
         
         return JSONResponse(content={
             "message": "Upload complete",
