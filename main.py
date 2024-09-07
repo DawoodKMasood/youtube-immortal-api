@@ -215,17 +215,29 @@ def validate_video(file_path):
     return info
 
 def get_video_info(file_path):
-    probe = ffmpeg.probe(file_path)
-    video_stream = next((stream for stream in probe['streams'] if stream['codec_type'] == 'video'), None)
-    if video_stream is None:
-        raise ValueError(f"No video stream found in {file_path}")
-    return {
-        'width': int(video_stream['width']),
-        'height': int(video_stream['height']),
-        'duration': float(video_stream['duration']),
-        'rotation': int(video_stream.get('tags', {}).get('rotate', '0')),
-        'fps': float(eval(video_stream['r_frame_rate']))
-    }
+    try:
+        command = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-count_packets',
+                   '-show_entries', 'stream=width,height,r_frame_rate,duration',
+                   '-of', 'json', file_path]
+        print(f"Executing command: {' '.join(command)}")
+        result = subprocess.run(command, capture_output=True, text=True, check=True)
+        print(f"FFprobe output: {result.stdout}")
+        probe = json.loads(result.stdout)
+        video_stream = probe['streams'][0]
+        return {
+            'width': int(video_stream['width']),
+            'height': int(video_stream['height']),
+            'duration': float(video_stream['duration']),
+            'rotation': int(video_stream.get('tags', {}).get('rotate', '0')),
+            'fps': float(eval(video_stream['r_frame_rate']))
+        }
+    except subprocess.CalledProcessError as e:
+        print(f"FFprobe error. Return code: {e.returncode}")
+        print(f"FFprobe stderr: {e.stderr}")
+        raise ValueError(f"FFprobe failed: {e.stderr}")
+    except Exception as e:
+        print(f"Unexpected error in get_video_info: {str(e)}")
+        raise
 
 def process_video_background(filename: str, db: Session, video_id: int):
     try:
