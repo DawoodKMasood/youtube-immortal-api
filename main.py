@@ -90,6 +90,23 @@ executor = ThreadPoolExecutor(max_workers=4)
 # Lock key for ensuring single video processing
 PROCESSING_LOCK_KEY = "video_processing_lock"
 
+def validate_file_integrity(file_path):
+    try:
+        file_size = os.path.getsize(file_path)
+        if file_size == 0:
+            raise ValueError("File is empty")
+        
+        # Quick check for MP4 file signature
+        with open(file_path, 'rb') as f:
+            file_start = f.read(8)
+        if file_start[4:8] not in (b'ftyp', b'moov'):
+            raise ValueError("File does not appear to be a valid MP4")
+        
+        return True
+    except Exception as e:
+        print(f"File integrity check failed: {str(e)}")
+        return False
+    
 # Function to acquire lock
 def acquire_lock():
     lock = redis_client.lock("video_processing_lock", timeout=300)  # 5 minutes timeout
@@ -253,6 +270,10 @@ def process_video_background(filename: str, db: Session, video_id: int):
         print(f"Starting video processing for video_id: {video_id}")
 
         file_path = os.path.join(UPLOAD_DIR, filename)
+
+        if not validate_file_integrity(file_path):
+            raise ValueError("File integrity check failed before processing")
+        
         adjusted_path = os.path.join(UPLOAD_DIR, f"adjusted_{filename}")
         output_path = os.path.join(OUTPUT_DIR, f"final_{filename}")
         thumbnail_path = os.path.join(THUMBNAIL_DIR, f"{video_id}.jpg")
@@ -485,6 +506,10 @@ async def upload_video(
         
         print(f"Background music file saved: {bg_music_path}, Size: {os.path.getsize(bg_music_path)} bytes")
     
+    if not validate_file_integrity(file_path):
+        os.remove(file_path)
+        raise HTTPException(status_code=400, detail="The uploaded file appears to be corrupt or incomplete. Please try uploading again.")
+
     db_video = Video(
         filename=safe_filename,
         status=VideoStatus.PENDING,
