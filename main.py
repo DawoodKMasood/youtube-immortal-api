@@ -463,16 +463,19 @@ def adjust_aspect_ratio(input_path, output_path):
     input_stream = ffmpeg.input(input_path)
     
     # Calculate scaling and padding
-    if width / height > 16 / 9:  # If wider than 16:9
-        new_height = min(1080, height)
-        new_width = new_height * 16 // 9
-        pad_width = new_width
+    target_aspect_ratio = 16 / 9
+    current_aspect_ratio = width / height
+
+    if current_aspect_ratio > target_aspect_ratio:  # If wider than 16:9
+        new_width = width
+        new_height = int(width / target_aspect_ratio)
+        pad_width = width
         pad_height = new_height
     else:  # If taller than 16:9 or exactly 16:9
-        new_width = min(1920, width)
-        new_height = new_width * 9 // 16
+        new_height = height
+        new_width = int(height * target_aspect_ratio)
         pad_width = new_width
-        pad_height = new_height
+        pad_height = height
 
     # Scale the video
     video = (
