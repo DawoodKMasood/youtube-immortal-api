@@ -9,6 +9,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Union
 import subprocess
+import json
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Form, BackgroundTasks, Header
 from fastapi.responses import FileResponse
@@ -84,6 +85,31 @@ for directory in [UPLOAD_DIR, OUTPUT_DIR, THUMBNAIL_DIR]:
 # Thread pool for concurrent processing
 executor = ThreadPoolExecutor(max_workers=4)
 
+def enqueue_video(video_id):
+    redis_client.rpush("video_queue", video_id)
+
+def get_queue_position(video_id):
+    queue = redis_client.lrange("video_queue", 0, -1)
+    return queue.index(str(video_id).encode()) + 1 if str(video_id).encode() in queue else 0
+
+def dequeue_video():
+    return redis_client.lpop("video_queue")
+
+def process_queue():
+    while True:
+        video_id = dequeue_video()
+        if video_id:
+            video_id = int(video_id)
+            db = SessionLocal()
+            try:
+                db_video = db.query(Video).filter(Video.id == video_id).first()
+                if db_video and db_video.status == VideoStatus.PENDING:
+                    process_video_background(db_video.filename, db, video_id)
+            finally:
+                db.close()
+        else:
+            break
+
 def check_and_set_permissions(directories):
        for dir in directories:
            if not os.path.exists(dir):
@@ -136,24 +162,38 @@ def get_video_info(file_path):
         'fps': float(eval(video_stream['r_frame_rate']))
     }
 
-def process_video_background(file_path: str, adjusted_path: str, output_path: str, thumbnail_path: str, db: Session, video_id: int, bg_music_path: str = None):
+def process_video_background(filename: str, db: Session, video_id: int):
     try:
         db_video = db.query(Video).filter(Video.id == video_id).first()
         db_video.status = VideoStatus.PROCESSING
         db.commit()
 
-        redis_client.set(f"video:{video_id}:status", VideoStatus.PROCESSING)
+        redis_client.setex(f"video:{video_id}:status", 3600, json.dumps({
+            "status": VideoStatus.PROCESSING,
+            "queue_position": 0
+        }))
 
         print(f"Starting video processing for video_id: {video_id}")
+
+        file_path = os.path.join(UPLOAD_DIR, filename)
+        adjusted_path = os.path.join(UPLOAD_DIR, f"adjusted_{filename}")
+        output_path = os.path.join(OUTPUT_DIR, f"final_{filename}")
+        thumbnail_path = os.path.join(THUMBNAIL_DIR, f"{video_id}.jpg")
+
+        # Step 1: Validate video
         print(f"Validating video: {file_path}")
         validate_video(file_path)
-        
+
+        # Step 2: Adjust aspect ratio
         print(f"Adjusting aspect ratio: {file_path} -> {adjusted_path}")
         adjust_aspect_ratio(file_path, adjusted_path)
-        
+
+        # Step 3: Combine videos (add intro, outro, watermark, background music)
         print(f"Combining videos: {adjusted_path} -> {output_path}")
+        bg_music_path = get_random_music()
         combine_videos(adjusted_path, output_path, bg_music_path)
-        
+
+        # Step 4: Generate thumbnail
         print(f"Generating thumbnail: {file_path} -> {thumbnail_path}")
         generate_thumbnail(file_path, thumbnail_path)
 
@@ -161,25 +201,36 @@ def process_video_background(file_path: str, adjusted_path: str, output_path: st
         db_video.thumbnail = os.path.basename(thumbnail_path)
         db.commit()
 
-        redis_client.set(f"video:{video_id}:status", VideoStatus.COMPLETED)
+        redis_client.setex(f"video:{video_id}:status", 3600, json.dumps({
+            "status": VideoStatus.COMPLETED,
+            "queue_position": 0
+        }))
 
         print(f"Video processing completed for video_id: {video_id}")
     except Exception as e:
         print(f"Error processing video {video_id}: {str(e)}")
+        traceback.print_exc()
         db_video.status = VideoStatus.FAILED
         db.commit()
 
-        redis_client.set(f"video:{video_id}:status", VideoStatus.FAILED)
+        redis_client.setex(f"video:{video_id}:status", 3600, json.dumps({
+            "status": VideoStatus.FAILED,
+            "queue_position": 0
+        }))
 
         raise
     finally:
-        for path in [file_path, adjusted_path, bg_music_path]:
-               if path and os.path.exists(path):
-                   try:
-                       os.remove(path)
-                       print(f"Removed temporary file: {path}")
-                   except Exception as e:
-                       print(f"Error removing file {path}: {str(e)}")
+        # Clean up temporary files
+        for path in [file_path, adjusted_path]:
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                    print(f"Removed temporary file: {path}")
+                except Exception as e:
+                    print(f"Error removing file {path}: {str(e)}")
+
+        # Process the next video in the queue
+        process_queue()
 
 def combine_videos(main_video: str, output_path: str, custom_bg_music: str = None):
     intro_file = INTRO_VIDEO
@@ -324,19 +375,6 @@ async def upload_video(
     safe_filename = f"{file_uuid}{file_extension}"
     
     file_path = os.path.join(UPLOAD_DIR, safe_filename)
-    adjusted_path = os.path.join(UPLOAD_DIR, f"adjusted_{safe_filename}")
-    output_path = os.path.join(OUTPUT_DIR, f"final_{safe_filename}")
-    thumbnail_path = os.path.join(THUMBNAIL_DIR, f"{file_uuid}.jpg")
-    
-    bg_music_path = None
-    if background_music and isinstance(background_music, UploadFile):
-        bg_music_extension = os.path.splitext(background_music.filename)[1]
-        bg_music_filename = f"{file_uuid}_bg{bg_music_extension}"
-        bg_music_path = os.path.join(UPLOAD_DIR, bg_music_filename)
-        with open(bg_music_path, "wb") as buffer:
-            buffer.write(await background_music.read())
-    elif background_music:
-        print(f"Received background_music as non-UploadFile: {background_music}")
     
     db_video = Video(
         filename=safe_filename,
@@ -355,21 +393,36 @@ async def upload_video(
     
     print(f"Video file saved: {file_path}, Size: {os.path.getsize(file_path)} bytes")
     
-    background_tasks.add_task(process_video_background, file_path, adjusted_path, output_path, thumbnail_path, db, db_video.id, bg_music_path)
+    enqueue_video(db_video.id)
+    queue_position = get_queue_position(db_video.id)
+
+    redis_client.setex(f"video:{db_video.id}:status", 3600, json.dumps({
+        "status": VideoStatus.PENDING,
+        "queue_position": queue_position
+    }))
+
+    background_tasks.add_task(process_queue)
     
-    return {"video_id": db_video.id, "status": VideoStatus.PENDING}
+    return {"video_id": db_video.id, "status": VideoStatus.PENDING, "queue_position": queue_position}
 
 @app.get("/video/{video_id}/status")
 async def get_video_status(video_id: int, db: Session = Depends(get_db)):
+    cached_status = redis_client.get(f"video:{video_id}:status")
+    if cached_status:
+        return json.loads(cached_status)
+    
     video = db.query(Video).filter(Video.id == video_id).first()
     if video is None:
         raise HTTPException(status_code=404, detail="Video not found")
     
-    redis_status = redis_client.get(f"video:{video_id}:status")
-    if redis_status:
-        return {"status": redis_status.decode()}
-    else:
-        return {"status": video.status}
+    queue_position = get_queue_position(video_id)
+    status_data = {
+        "status": video.status,
+        "queue_position": queue_position
+    }
+    
+    redis_client.setex(f"video:{video_id}:status", 3600, json.dumps(status_data))
+    return status_data
 
 @app.get("/videos")
 def list_videos(db: Session = Depends(get_db)):
@@ -489,7 +542,13 @@ async def startup_event():
 @app.on_event("startup")
 async def startup_event():
     check_and_set_permissions([UPLOAD_DIR, OUTPUT_DIR, THUMBNAIL_DIR])
-    
+
+# Start the queue processing in a background task
+@app.on_event("startup")
+def start_queue_processing():
+    background_tasks = BackgroundTasks()
+    background_tasks.add_task(process_queue)
+
 port = int(os.environ.get("PORT", 8000))
 
 if __name__ == "__main__":
