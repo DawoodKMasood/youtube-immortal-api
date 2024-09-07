@@ -41,6 +41,7 @@ redis_client = redis.from_url(REDIS_URL)
 class VideoStatus(str, PyEnum):
     PENDING = "PENDING"
     PROCESSING = "PROCESSING"
+    UPLOADED = "UPLOADED"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     APPROVED = "APPROVED"
@@ -528,8 +529,93 @@ def save_upload_file_tmp(upload_file: UploadFile) -> str:
     finally:
         upload_file.file.close()
 
-@app.post("/upload-chunk/")
-async def upload_chunk(
+@app.post("/upload-music-chunk/")
+async def upload_music_chunk(
+    file: UploadFile = File(...),
+    chunk_number: int = Form(...),
+    total_chunks: int = Form(...),
+    filename: str = Form(...),
+    db: Session = Depends(get_db)
+):
+    chunk_dir = os.path.join(MUSIC_DIR, "chunks")
+    os.makedirs(chunk_dir, exist_ok=True)
+    
+    if chunk_number == 1:
+        unique_filename = generate_unique_filename(filename)
+        redis_client.setex(f"music_upload:{filename}", 3600, unique_filename)
+    else:
+        unique_filename = redis_client.get(f"music_upload:{filename}")
+        if not unique_filename:
+            raise HTTPException(status_code=400, detail="Upload session expired or invalid")
+        unique_filename = unique_filename.decode('utf-8')
+    
+    file_uuid = unique_filename.split('.')[0]
+    chunk_filename = f"{file_uuid}_{chunk_number}"
+    chunk_path = os.path.join(chunk_dir, chunk_filename)
+    
+    with open(chunk_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    
+    if chunk_number == total_chunks:
+        final_filename = unique_filename
+        final_path = os.path.join(MUSIC_DIR, final_filename)
+        
+        with open(final_path, "wb") as final_file:
+            for i in range(1, total_chunks + 1):
+                chunk_file = os.path.join(chunk_dir, f"{file_uuid}_{i}")
+                if os.path.exists(chunk_file):
+                    with open(chunk_file, "rb") as cf:
+                        shutil.copyfileobj(cf, final_file)
+                    os.remove(chunk_file)
+                else:
+                    raise HTTPException(status_code=400, detail=f"Music chunk file {i} is missing")
+        
+        redis_client.delete(f"music_upload:{filename}")
+        
+        return JSONResponse(content={
+            "message": "Music upload complete",
+            "filename": final_filename
+        })
+    else:
+        return JSONResponse(content={"message": f"Music chunk {chunk_number} of {total_chunks} received"})
+
+@app.post("/process-video/")
+async def process_video(
+    video_data: dict,
+    db: Session = Depends(get_db)
+):
+    video_filename = video_data.get("video_filename")
+    music_filename = video_data.get("music_filename")
+
+    if not video_filename:
+        raise HTTPException(status_code=400, detail="Video filename is required")
+
+    video = db.query(Video).filter(Video.filename == video_filename).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    video.background_music = music_filename
+    video.status = VideoStatus.PENDING
+    db.commit()
+
+    enqueue_video(video.id)
+    clean_queue()
+    queue_position = get_queue_position(video.id)
+
+    redis_client.setex(f"video:{video.id}:status", 3600, json.dumps({
+        "status": VideoStatus.PENDING,
+        "queue_position": queue_position
+    }))
+
+    return JSONResponse(content={
+        "message": "Video queued for processing",
+        "video_id": video.id,
+        "status": VideoStatus.PENDING,
+        "queue_position": queue_position
+    })
+
+@app.post("/upload-video-chunk/")
+async def upload_video_chunk(
     file: UploadFile = File(...),
     chunk_number: int = Form(...),
     total_chunks: int = Form(...),
@@ -538,7 +624,6 @@ async def upload_chunk(
     game_mode: str = Form(...),
     weapon: str = Form(...),
     map_name: str = Form(...),
-    background_music: UploadFile = File(default=None),
     db: Session = Depends(get_db)
 ):
     chunk_dir = os.path.join(UPLOAD_DIR, "chunks")
@@ -586,19 +671,6 @@ async def upload_chunk(
         
         redis_client.delete(f"upload:{filename}")
         
-        bg_music_filename = None
-        if isinstance(background_music, UploadFile):
-            print(f"Processing background music: {background_music.filename}")
-            bg_music_path = save_upload_file_tmp(background_music)
-            bg_music_uuid = uuid.uuid4()
-            bg_music_extension = os.path.splitext(background_music.filename)[1]
-            bg_music_filename = f"{bg_music_uuid}{bg_music_extension}"
-            final_bg_music_path = os.path.join(MUSIC_DIR, bg_music_filename)
-            shutil.move(bg_music_path, final_bg_music_path)
-            print(f"Background music saved to {final_bg_music_path}")
-        else:
-            print("No background music provided")
-        
         if not validate_file_integrity(final_path):
             os.remove(final_path)
             raise HTTPException(status_code=400, detail="The uploaded file appears to be corrupt or incomplete. Please try uploading again.")
@@ -607,12 +679,11 @@ async def upload_chunk(
         
         db_video = Video(
             filename=final_filename,
-            status=VideoStatus.PENDING,
+            status=VideoStatus.UPLOADED,
             account_name=account_name,
             game_mode=game_mode,
             weapon=weapon,
-            map_name=map_name,
-            background_music=bg_music_filename
+            map_name=map_name
         )
         db.add(db_video)
         db.commit()
@@ -620,22 +691,11 @@ async def upload_chunk(
         
         print(f"Database entry created for video ID: {db_video.id}")
         
-        enqueue_video(db_video.id)
-        clean_queue()
-        queue_position = get_queue_position(db_video.id)
-        
-        redis_client.setex(f"video:{db_video.id}:status", 3600, json.dumps({
-            "status": VideoStatus.PENDING,
-            "queue_position": queue_position
-        }))
-        
-        print(f"Video enqueued for processing. Queue position: {queue_position}")
-        
         return JSONResponse(content={
             "message": "Upload complete",
             "video_id": db_video.id,
-            "status": VideoStatus.PENDING,
-            "queue_position": queue_position
+            "filename": final_filename,
+            "status": VideoStatus.UPLOADED
         })
     else:
         return JSONResponse(content={"message": f"Chunk {chunk_number} of {total_chunks} received"})
