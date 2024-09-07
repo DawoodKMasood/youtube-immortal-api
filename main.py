@@ -379,7 +379,7 @@ def combine_videos(main_video: str, output_path: str, custom_bg_music: str = Non
 
     if bg_music_tracks:
         concatenated_bg_music = ffmpeg.concat(*bg_music_tracks, v=0, a=1)
-        bg_music_adjusted = concatenated_bg_music.filter('volume', volume=0.5)
+        bg_music_adjusted = concatenated_bg_music.filter('volume', volume=0.4)
     else:
         bg_music_adjusted = ffmpeg.input('anullsrc=r=44100:cl=stereo', f='lavfi', t=total_duration)
 
