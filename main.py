@@ -502,6 +502,11 @@ def adjust_aspect_ratio(input_path, output_path):
         print(f"Error in adjust_aspect_ratio: {str(e)}")
         raise
 
+def generate_unique_filename(original_filename):
+    unique_id = str(uuid.uuid4())
+    name, extension = os.path.splitext(original_filename)
+    return f"{name}_{unique_id}{extension}"
+
 def generate_thumbnail(input_path, output_path):
     duration = float(ffmpeg.probe(input_path)['streams'][0]['duration'])
     (
@@ -539,11 +544,23 @@ async def upload_chunk(
     chunk_dir = os.path.join(UPLOAD_DIR, "chunks")
     os.makedirs(chunk_dir, exist_ok=True)
     
-    file_uuid = filename.split('.')[0]  # Use the filename (without extension) as the UUID
+    if chunk_number == 1:
+        # Generate a unique filename for the first chunk
+        unique_filename = generate_unique_filename(filename)
+        # Store the unique filename in Redis for this upload session
+        redis_client.setex(f"upload:{filename}", 3600, unique_filename)
+    else:
+        # Retrieve the unique filename for subsequent chunks
+        unique_filename = redis_client.get(f"upload:{filename}")
+        if not unique_filename:
+            raise HTTPException(status_code=400, detail="Upload session expired or invalid")
+        unique_filename = unique_filename.decode('utf-8')
+    
+    file_uuid = unique_filename.split('.')[0]
     chunk_filename = f"{file_uuid}_{chunk_number}"
     chunk_path = os.path.join(chunk_dir, chunk_filename)
     
-    print(f"Receiving chunk {chunk_number} of {total_chunks} for file {filename}")
+    print(f"Receiving chunk {chunk_number} of {total_chunks} for file {unique_filename}")
     
     with open(chunk_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
@@ -551,9 +568,8 @@ async def upload_chunk(
     print(f"Saved chunk {chunk_number} to {chunk_path}")
     
     if chunk_number == total_chunks:
-        print(f"All chunks received for {filename}. Combining chunks...")
-        # All chunks received, combine them
-        final_filename = f"{file_uuid}.mp4"
+        print(f"All chunks received for {unique_filename}. Combining chunks...")
+        final_filename = unique_filename
         final_path = os.path.join(UPLOAD_DIR, final_filename)
         
         with open(final_path, "wb") as final_file:
@@ -570,6 +586,9 @@ async def upload_chunk(
                     raise HTTPException(status_code=400, detail=f"Chunk file {i} is missing")
         
         print(f"All chunks combined into {final_path}")
+        
+        # Clean up Redis key
+        redis_client.delete(f"upload:{filename}")
         
         # Process background music if provided
         bg_music_filename = None
