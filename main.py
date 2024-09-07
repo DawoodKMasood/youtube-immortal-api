@@ -123,7 +123,8 @@ def process_queue():
                     finally:
                         db.close()
                 else:
-                    break  # No more videos in the queue
+                    # No more videos in the queue, sleep for a bit before checking again
+                    time.sleep(5)
             finally:
                 release_lock()
         else:
@@ -578,11 +579,10 @@ async def startup_event():
 async def startup_event():
     check_and_set_permissions([UPLOAD_DIR, OUTPUT_DIR, THUMBNAIL_DIR])
 
-# Start the queue processing in a background task
 @app.on_event("startup")
 def start_queue_processing():
-    background_tasks = BackgroundTasks()
-    background_tasks.add_task(process_queue)
+    import threading
+    threading.Thread(target=process_queue, daemon=True).start()
 
 port = int(os.environ.get("PORT", 8000))
 
