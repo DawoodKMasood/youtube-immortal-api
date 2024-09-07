@@ -233,9 +233,7 @@ def get_video_info(file_path):
         command = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-count_packets',
                    '-show_entries', 'stream=width,height,r_frame_rate,duration',
                    '-of', 'json', file_path]
-        print(f"Executing command: {' '.join(command)}")
         result = subprocess.run(command, capture_output=True, text=True, check=True)
-        print(f"FFprobe output: {result.stdout}")
         probe = json.loads(result.stdout)
         video_stream = probe['streams'][0]
         return {
