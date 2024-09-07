@@ -136,7 +136,13 @@ def clean_queue():
     print(f"Cleaned queue. Current queue: {redis_client.lrange('video_queue', 0, -1)}")
 
 def process_queue():
+    empty_queue_sleep_time = 30  # seconds
     while True:
+        if redis_client.llen("video_queue") == 0:
+            print(f"Queue is empty. Sleeping for {empty_queue_sleep_time} seconds.")
+            time.sleep(empty_queue_sleep_time)
+            continue
+
         acquired, lock = acquire_lock()
         if acquired:
             try:
@@ -155,12 +161,10 @@ def process_queue():
                     finally:
                         db.close()
                 else:
-                    print("No videos in queue, waiting...")
                     time.sleep(5)
             finally:
                 release_lock(lock)
         else:
-            print("Could not acquire lock, waiting...")
             time.sleep(5)
 
 # Caching decorator
