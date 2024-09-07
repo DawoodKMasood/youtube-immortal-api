@@ -537,15 +537,20 @@ async def download_video(video_id: int, db: Session = Depends(get_db)):
     
     return FileResponse(video_path, media_type="video/mp4", filename=f"processed_{video.filename}")
 
-@app.post("/admin/reset-database")
-async def reset_database(db: Session = Depends(get_db), admin_password: str = Header(...)):
+@app.post("/admin/reset")
+async def reset_everything(db: Session = Depends(get_db), admin_password: str = Header(...)):
     if not secrets.compare_digest(admin_password, '1nf0rmM@tic$'):
         raise HTTPException(status_code=403, detail="Invalid admin password")
     
     try:
+        # Reset database
         db.query(Video).delete()
         db.commit()
 
+        # Clear Redis
+        redis_client.flushall()
+
+        # Delete files
         for directory in [UPLOAD_DIR, OUTPUT_DIR, THUMBNAIL_DIR]:
             for filename in os.listdir(directory):
                 file_path = os.path.join(directory, filename)
@@ -557,10 +562,14 @@ async def reset_database(db: Session = Depends(get_db), admin_password: str = He
                 except Exception as e:
                     print(f'Failed to delete {file_path}. Reason: {e}')
 
-        return {"message": "Database reset successful. All video records and files have been deleted."}
+        # Re-initialize necessary Redis structures
+        redis_client.delete("video_queue")
+        redis_client.delete("video_processing_lock")
+
+        return {"message": "Reset successful. All video records, files, and Redis data have been cleared."}
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"An error occurred while resetting the database: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"An error occurred during reset: {str(e)}")
 
 @app.get("/health")
 async def health_check(db: Session = Depends(get_db)):
