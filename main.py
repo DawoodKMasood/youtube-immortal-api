@@ -1,6 +1,7 @@
 import os
 import random
 import shutil
+import tempfile
 import traceback
 import uuid
 import secrets
@@ -13,7 +14,7 @@ import subprocess
 import json
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Form, BackgroundTasks, Header
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, Enum, text
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.ext.declarative import declarative_base
@@ -461,6 +462,100 @@ def generate_thumbnail(input_path, output_path):
         .run(capture_stdout=True, capture_stderr=True)
     )
 
+# New helper function for chunk uploads
+def save_upload_file_tmp(upload_file: UploadFile) -> str:
+    try:
+        suffix = os.path.splitext(upload_file.filename)[1]
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            shutil.copyfileobj(upload_file.file, tmp)
+        return tmp.name
+    finally:
+        upload_file.file.close()
+
+@app.post("/upload-chunk/")
+async def upload_chunk(
+    file: UploadFile = File(...),
+    chunk_number: int = Form(...),
+    total_chunks: int = Form(...),
+    filename: str = Form(...),
+    account_name: str = Form(...),
+    game_mode: str = Form(...),
+    weapon: str = Form(...),
+    map_name: str = Form(...),
+    background_music: Union[UploadFile, str, None] = Form(default=None),
+    db: Session = Depends(get_db)
+):
+    chunk_dir = os.path.join(UPLOAD_DIR, "chunks")
+    os.makedirs(chunk_dir, exist_ok=True)
+    
+    file_uuid = str(uuid.uuid4())
+    chunk_filename = f"{file_uuid}_{chunk_number}"
+    chunk_path = os.path.join(chunk_dir, chunk_filename)
+    
+    with open(chunk_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    
+    if chunk_number == total_chunks:
+        # All chunks received, combine them
+        final_filename = f"{file_uuid}_{filename}"
+        final_path = os.path.join(UPLOAD_DIR, final_filename)
+        
+        with open(final_path, "wb") as final_file:
+            for i in range(1, total_chunks + 1):
+                chunk_file = os.path.join(chunk_dir, f"{file_uuid}_{i}")
+                with open(chunk_file, "rb") as cf:
+                    shutil.copyfileobj(cf, final_file)
+                os.remove(chunk_file)
+        
+        # Process background music if provided
+        bg_music_filename = None
+        if background_music:
+            bg_music_path = save_upload_file_tmp(background_music)
+            bg_music_uuid = uuid.uuid4()
+            bg_music_extension = os.path.splitext(background_music.filename)[1]
+            bg_music_filename = f"{bg_music_uuid}{bg_music_extension}"
+            final_bg_music_path = os.path.join(MUSIC_DIR, bg_music_filename)
+            shutil.move(bg_music_path, final_bg_music_path)
+        
+        # Validate file integrity
+        if not validate_file_integrity(final_path):
+            os.remove(final_path)
+            raise HTTPException(status_code=400, detail="The uploaded file appears to be corrupt or incomplete. Please try uploading again.")
+        
+        # Create database entry
+        db_video = Video(
+            filename=final_filename,
+            status=VideoStatus.PENDING,
+            account_name=account_name,
+            game_mode=game_mode,
+            weapon=weapon,
+            map_name=map_name,
+            background_music=bg_music_filename
+        )
+        db.add(db_video)
+        db.commit()
+        db.refresh(db_video)
+        
+        # Enqueue video for processing
+        enqueue_video(db_video.id)
+        clean_queue()
+        queue_position = get_queue_position(db_video.id)
+        
+        redis_client.setex(f"video:{db_video.id}:status", 3600, json.dumps({
+            "status": VideoStatus.PENDING,
+            "queue_position": queue_position
+        }))
+        
+        return JSONResponse(content={
+            "message": "Upload complete",
+            "video_id": db_video.id,
+            "status": VideoStatus.PENDING,
+            "queue_position": queue_position
+        })
+    else:
+        return JSONResponse(content={"message": f"Chunk {chunk_number} of {total_chunks} received"})
+
+# Modify the existing /upload/ route to use the new chunk upload mechanism
 @app.post("/upload/")
 async def upload_video(
     background_tasks: BackgroundTasks,
@@ -470,79 +565,21 @@ async def upload_video(
     game_mode: str = Form(...),
     weapon: str = Form(...),
     map_name: str = Form(...),
-    background_music: Union[UploadFile, str, None] = FormAlias(default=None),
+    background_music: Union[UploadFile, str, None] = Form(default=None),
 ):
-    # Save the uploaded file temporarily
-    temp_file_path = os.path.join(UPLOAD_DIR, f"temp_{file.filename}")
-    with open(temp_file_path, "wb") as buffer:
-        buffer.write(await file.read())
-
-    try:
-        # Use FFmpeg to probe the file
-        probe = ffmpeg.probe(temp_file_path)
-        video_stream = next((stream for stream in probe['streams'] if stream['codec_type'] == 'video'), None)
-        if video_stream is None:
-            raise ValueError("No video stream found in the uploaded file")
-    except Exception as e:
-        os.remove(temp_file_path)  # Clean up the temporary file
-        raise HTTPException(status_code=400, detail=f"Invalid video file: {str(e)}")
-    
-    file_uuid = uuid.uuid4()
-    file_extension = os.path.splitext(file.filename)[1]
-    safe_filename = f"{file_uuid}{file_extension}"
-    
-    file_path = os.path.join(UPLOAD_DIR, safe_filename)
-    os.rename(temp_file_path, file_path)
-
-    bg_music_path = None
-    if background_music:
-        bg_music_uuid = uuid.uuid4()
-        bg_music_extension = os.path.splitext(background_music.filename)[1]
-        bg_music_filename = f"{bg_music_uuid}{bg_music_extension}"
-        bg_music_path = os.path.join(MUSIC_DIR, bg_music_filename)
-        
-        with open(bg_music_path, "wb") as buffer:
-            buffer.write(await background_music.read())
-        
-        print(f"Background music file saved: {bg_music_path}, Size: {os.path.getsize(bg_music_path)} bytes")
-    
-    if not validate_file_integrity(file_path):
-        os.remove(file_path)
-        raise HTTPException(status_code=400, detail="The uploaded file appears to be corrupt or incomplete. Please try uploading again.")
-
-    db_video = Video(
-        filename=safe_filename,
-        status=VideoStatus.PENDING,
+    # Use the chunk upload mechanism even for single file uploads
+    return await upload_chunk(
+        file=file,
+        chunk_number=1,
+        total_chunks=1,
+        filename=file.filename,
         account_name=account_name,
         game_mode=game_mode,
         weapon=weapon,
         map_name=map_name,
-        background_music=bg_music_filename if bg_music_path else None
+        background_music=background_music,
+        db=db
     )
-    db.add(db_video)
-    db.commit()
-    db.refresh(db_video)
-
-    with open(file_path, "wb") as buffer:
-        buffer.write(await file.read())
-    
-    print(f"Video file saved: {file_path}, Size: {os.path.getsize(file_path)} bytes")
-    
-    enqueue_video(db_video.id)
-    clean_queue()  # Clean the queue after enqueueing
-    queue_position = get_queue_position(db_video.id)
-
-    redis_client.setex(f"video:{db_video.id}:status", 3600, json.dumps({
-        "status": VideoStatus.PENDING,
-        "queue_position": queue_position
-    }))
-
-    # Ensure the queue processing is running
-    if not hasattr(app.state, "queue_processing_started"):
-        background_tasks.add_task(process_queue)
-        app.state.queue_processing_started = True
-    
-    return {"video_id": db_video.id, "status": VideoStatus.PENDING, "queue_position": queue_position}
 
 @app.get("/video/{video_id}/status")
 async def get_video_status(video_id: int, db: Session = Depends(get_db)):
