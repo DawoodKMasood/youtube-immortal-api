@@ -5,7 +5,7 @@ import traceback
 import uuid
 import secrets
 from enum import Enum as PyEnum
-from datetime import datetime
+from datetime import datetime, time
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Union
 import subprocess
@@ -85,6 +85,18 @@ for directory in [UPLOAD_DIR, OUTPUT_DIR, THUMBNAIL_DIR]:
 # Thread pool for concurrent processing
 executor = ThreadPoolExecutor(max_workers=4)
 
+# Lock key for ensuring single video processing
+PROCESSING_LOCK_KEY = "video_processing_lock"
+
+# Function to acquire lock
+def acquire_lock():
+    return redis_client.set(PROCESSING_LOCK_KEY, "locked", nx=True, ex=3600)  # Lock expires after 1 hour
+
+# Function to release lock
+def release_lock():
+    redis_client.delete(PROCESSING_LOCK_KEY)
+
+# Redis queue functions
 def enqueue_video(video_id):
     redis_client.rpush("video_queue", video_id)
 
@@ -97,18 +109,39 @@ def dequeue_video():
 
 def process_queue():
     while True:
-        video_id = dequeue_video()
-        if video_id:
-            video_id = int(video_id)
-            db = SessionLocal()
+        if acquire_lock():
             try:
-                db_video = db.query(Video).filter(Video.id == video_id).first()
-                if db_video and db_video.status == VideoStatus.PENDING:
-                    process_video_background(db_video.filename, db, video_id)
+                video_id = dequeue_video()
+                if video_id:
+                    video_id = int(video_id)
+                    db = SessionLocal()
+                    try:
+                        db_video = db.query(Video).filter(Video.id == video_id).first()
+                        if db_video and db_video.status == VideoStatus.PENDING:
+                            process_video_background(db_video.filename, db, video_id)
+                    finally:
+                        db.close()
+                else:
+                    break  # No more videos in the queue
             finally:
-                db.close()
+                release_lock()
         else:
-            break
+            # Another instance is processing, wait and try again
+            time.sleep(5)
+
+# Caching decorator
+def cache_response(expire_time=3600):
+    def decorator(func):
+        async def wrapper(*args, **kwargs):
+            cache_key = f"cache:{func.__name__}:{str(args)}:{str(kwargs)}"
+            cached_result = redis_client.get(cache_key)
+            if cached_result:
+                return json.loads(cached_result)
+            result = await func(*args, **kwargs)
+            redis_client.setex(cache_key, expire_time, json.dumps(result))
+            return result
+        return wrapper
+    return decorator
 
 def check_and_set_permissions(directories):
        for dir in directories:
@@ -425,6 +458,7 @@ async def get_video_status(video_id: int, db: Session = Depends(get_db)):
     return status_data
 
 @app.get("/videos")
+@cache_response(expire_time=300)  # Cache for 5 minutes
 def list_videos(db: Session = Depends(get_db)):
     videos = db.query(Video).filter(Video.status.in_([VideoStatus.COMPLETED, VideoStatus.APPROVED, VideoStatus.REJECTED])).all()
     return [{
