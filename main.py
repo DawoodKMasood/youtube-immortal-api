@@ -557,13 +557,16 @@ async def upload_chunk(
         with open(final_path, "wb") as final_file:
             for i in range(1, total_chunks + 1):
                 chunk_file = os.path.join(chunk_dir, f"{file_uuid}_{i}")
-                with open(chunk_file, "rb") as cf:
-                    shutil.copyfileobj(cf, final_file)
-                os.remove(chunk_file)
+                if os.path.exists(chunk_file):
+                    with open(chunk_file, "rb") as cf:
+                        shutil.copyfileobj(cf, final_file)
+                    os.remove(chunk_file)
+                else:
+                    raise HTTPException(status_code=400, detail=f"Chunk file {i} is missing")
         
         # Process background music if provided
         bg_music_filename = None
-        if background_music:
+        if isinstance(background_music, UploadFile):
             bg_music_path = save_upload_file_tmp(background_music)
             bg_music_uuid = uuid.uuid4()
             bg_music_extension = os.path.splitext(background_music.filename)[1]
