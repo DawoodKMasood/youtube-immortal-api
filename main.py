@@ -97,7 +97,6 @@ def acquire_lock():
 def release_lock():
     redis_client.delete(PROCESSING_LOCK_KEY)
 
-# Redis queue functions
 def enqueue_video(video_id):
     redis_client.rpush("video_queue", video_id)
 
@@ -583,6 +582,19 @@ async def startup_event():
 def start_queue_processing():
     import threading
     threading.Thread(target=process_queue, daemon=True).start()
+
+# Modify the existing startup event or add a new one
+@app.on_event("startup")
+async def requeue_pending_videos():
+    db = SessionLocal()
+    try:
+        pending_videos = db.query(Video).filter(Video.status == VideoStatus.PENDING).all()
+        for video in pending_videos:
+            enqueue_video(video.id)
+        print(f"Requeued {len(pending_videos)} pending videos on startup")
+    finally:
+        db.close()
+
 
 port = int(os.environ.get("PORT", 8000))
 
