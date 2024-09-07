@@ -283,7 +283,11 @@ def process_video_background(filename: str, db: Session, video_id: int):
 
         # Step 2: Adjust aspect ratio
         print(f"Adjusting aspect ratio: {file_path} -> {adjusted_path}")
-        adjust_aspect_ratio(file_path, adjusted_path)
+        try:
+            adjust_aspect_ratio(file_path, adjusted_path)
+        except Exception as e:
+            print(f"Error adjusting aspect ratio: {str(e)}")
+            raise
 
         # Check if custom background music was provided
         custom_bg_music = None
@@ -319,7 +323,7 @@ def process_video_background(filename: str, db: Session, video_id: int):
 
         redis_client.setex(f"video:{video_id}:status", 3600, json.dumps({
             "status": VideoStatus.FAILED,
-            "queue_position": 0
+            "error_message": str(e)
         }))
 
         raise
@@ -444,9 +448,23 @@ def adjust_aspect_ratio(input_path, output_path):
     stream = ffmpeg.output(video, input_stream.audio, output_path) if audio_stream else ffmpeg.output(video, output_path)
     
     try:
-        ffmpeg.run(stream, overwrite_output=True, capture_stdout=True, capture_stderr=True)
-    except ffmpeg.Error as e:
-        print(f"FFmpeg stderr:\n{e.stderr.decode()}")
+        # Use subprocess directly for more control
+        process = subprocess.Popen(
+            ffmpeg.compile(stream),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        stdout, stderr = process.communicate(timeout=3600)  # 1 hour timeout
+        
+        if process.returncode != 0:
+            print(f"FFmpeg stderr:\n{stderr.decode()}")
+            raise Exception(f"FFmpeg command failed with error code {process.returncode}")
+        
+    except subprocess.TimeoutExpired:
+        process.kill()
+        raise Exception("FFmpeg process timed out after 1 hour")
+    except Exception as e:
+        print(f"Error in adjust_aspect_ratio: {str(e)}")
         raise
 
 def generate_thumbnail(input_path, output_path):
