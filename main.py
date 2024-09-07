@@ -136,6 +136,9 @@ def clean_queue():
     print(f"Cleaned queue. Current queue: {redis_client.lrange('video_queue', 0, -1)}")
 
 def process_queue():
+    pubsub = redis_client.pubsub()
+    pubsub.subscribe('video_processed')
+    
     empty_queue_sleep_time = 30  # seconds
     while True:
         if redis_client.llen("video_queue") == 0:
@@ -154,6 +157,11 @@ def process_queue():
                         db_video = db.query(Video).filter(Video.id == video_id).first()
                         if db_video and db_video.status == VideoStatus.PENDING:
                             process_video_background(db_video.filename, db, video_id)
+                            
+                            # Wait for the 'video_processed' signal
+                            for message in pubsub.listen():
+                                if message['type'] == 'message':
+                                    break
                         else:
                             print(f"Skipping video {video_id}: status is {db_video.status if db_video else 'None'}")
                     except Exception as e:
@@ -300,8 +308,8 @@ def process_video_background(filename: str, db: Session, video_id: int):
                 except Exception as e:
                     print(f"Error removing file {path}: {str(e)}")
 
-        # Process the next video in the queue
-        process_queue()
+        # Signal that processing is complete
+        redis_client.publish('video_processed', video_id)
 
 def combine_videos(main_video: str, output_path: str, custom_bg_music: str = None):
     intro_file = INTRO_VIDEO
