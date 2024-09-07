@@ -142,7 +142,6 @@ def process_queue():
     empty_queue_sleep_time = 30  # seconds
     while True:
         if redis_client.llen("video_queue") == 0:
-            print(f"Queue is empty. Sleeping for {empty_queue_sleep_time} seconds.")
             time.sleep(empty_queue_sleep_time)
             continue
 
