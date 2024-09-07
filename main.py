@@ -91,11 +91,21 @@ PROCESSING_LOCK_KEY = "video_processing_lock"
 
 # Function to acquire lock
 def acquire_lock():
-    return redis_client.set(PROCESSING_LOCK_KEY, "locked", nx=True, ex=3600)  # Lock expires after 1 hour
+    lock = redis_client.lock("video_processing_lock", timeout=300)  # 5 minutes timeout
+    acquired = lock.acquire(blocking=False)
+    if acquired:
+        print("Lock acquired successfully")
+    else:
+        print("Failed to acquire lock")
+    return acquired, lock
 
 # Function to release lock
-def release_lock():
-    redis_client.delete(PROCESSING_LOCK_KEY)
+def release_lock(lock):
+    try:
+        lock.release()
+        print("Lock released successfully")
+    except redis.exceptions.LockError:
+        print("Error releasing lock: Lock was not held")
 
 def enqueue_video(video_id):
     redis_client.rpush("video_queue", video_id)
@@ -109,7 +119,8 @@ def dequeue_video():
 
 def process_queue():
     while True:
-        if acquire_lock():
+        acquired, lock = acquire_lock()
+        if acquired:
             try:
                 video_id = dequeue_video()
                 if video_id:
@@ -129,7 +140,7 @@ def process_queue():
                     print("No videos in queue, waiting...")
                     time.sleep(5)
             finally:
-                release_lock()
+                release_lock(lock)
         else:
             print("Could not acquire lock, waiting...")
             time.sleep(5)
@@ -597,6 +608,10 @@ async def startup_event():
     import threading
     threading.Thread(target=process_queue, daemon=True).start()
     app.state.queue_processing_started = True
+
+    # Clear any existing locks
+    redis_client.delete("video_processing_lock")
+    print("Cleared existing locks on startup")
 
 
 port = int(os.environ.get("PORT", 8000))
