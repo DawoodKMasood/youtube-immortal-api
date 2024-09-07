@@ -109,13 +109,31 @@ def release_lock(lock):
 
 def enqueue_video(video_id):
     redis_client.rpush("video_queue", video_id)
+    print(f"Enqueued video {video_id}. Current queue: {redis_client.lrange('video_queue', 0, -1)}")
 
 def get_queue_position(video_id):
     queue = redis_client.lrange("video_queue", 0, -1)
-    return queue.index(str(video_id).encode()) + 1 if str(video_id).encode() in queue else 0
+    try:
+        return queue.index(str(video_id).encode()) + 1
+    except ValueError:
+        return 0
 
 def dequeue_video():
     return redis_client.lpop("video_queue")
+
+def clean_queue():
+    db = SessionLocal()
+    try:
+        queue = redis_client.lrange("video_queue", 0, -1)
+        for video_id in queue:
+            video_id = int(video_id)
+            video = db.query(Video).filter(Video.id == video_id).first()
+            if not video or video.status != VideoStatus.PENDING:
+                redis_client.lrem("video_queue", 0, video_id)
+                print(f"Removed video {video_id} from queue as it's not pending")
+    finally:
+        db.close()
+    print(f"Cleaned queue. Current queue: {redis_client.lrange('video_queue', 0, -1)}")
 
 def process_queue():
     while True:
@@ -443,6 +461,7 @@ async def upload_video(
     print(f"Video file saved: {file_path}, Size: {os.path.getsize(file_path)} bytes")
     
     enqueue_video(db_video.id)
+    clean_queue()  # Clean the queue after enqueueing
     queue_position = get_queue_position(db_video.id)
 
     redis_client.setex(f"video:{db_video.id}:status", 3600, json.dumps({
@@ -452,7 +471,7 @@ async def upload_video(
 
     # Ensure the queue processing is running
     if not hasattr(app.state, "queue_processing_started"):
-        background_tasks.add_task(start_queue_processing)
+        background_tasks.add_task(process_queue)
         app.state.queue_processing_started = True
     
     return {"video_id": db_video.id, "status": VideoStatus.PENDING, "queue_position": queue_position}
@@ -594,12 +613,16 @@ async def startup_event():
 
     check_and_set_permissions([UPLOAD_DIR, OUTPUT_DIR, THUMBNAIL_DIR])
 
+    # Clean the queue on startup
+    clean_queue()
+
     # Requeue pending videos
     db = SessionLocal()
     try:
         pending_videos = db.query(Video).filter(Video.status == VideoStatus.PENDING).all()
         for video in pending_videos:
-            enqueue_video(video.id)
+            if get_queue_position(video.id) == 0:  # Only enqueue if not already in queue
+                enqueue_video(video.id)
         print(f"Requeued {len(pending_videos)} pending videos on startup")
     finally:
         db.close()
