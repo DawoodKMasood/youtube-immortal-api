@@ -226,8 +226,6 @@ def validate_video(file_path):
     info = get_video_info(file_path)
     if not is_landscape(info['width'], info['height'], info['rotation']):
         raise ValueError("Video must be in landscape orientation")
-    if min(info['width'], info['height']) < 720:
-        raise ValueError("Video resolution must be at least 720p")
     if info['fps'] < 30:
         raise ValueError("Video frame rate must be at least 30 FPS")
     return info
