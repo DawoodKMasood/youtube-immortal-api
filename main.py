@@ -344,20 +344,21 @@ def combine_videos(main_video: str, output_path: str, custom_bg_music: str = Non
     outro_file = OUTRO_VIDEO
     watermark_file = WATERMARK
 
-    main_info = ffmpeg.probe(main_file)
-    main_video_stream = next((stream for stream in main_info['streams'] if stream['codec_type'] == 'video'), None)
-    if main_video_stream is None:
-        raise ValueError(f"No video stream found in {main_file}")
-    
-    fps = eval(main_video_stream['r_frame_rate'])
+    # Function to scale video to 1920x1080
+    def scale_video(input_file):
+        return (
+            ffmpeg.input(input_file)
+            .filter('scale', 1920, 1080)
+            .filter('setsar', 1)  # Set Sample Aspect Ratio to 1:1
+        )
 
-    intro = ffmpeg.input(intro_file)
-    main = ffmpeg.input(main_file)
-    outro = ffmpeg.input(outro_file)
+    intro = scale_video(intro_file)
+    main = scale_video(main_file)
+    outro = scale_video(outro_file)
     watermark = ffmpeg.input(watermark_file)
 
     intro_duration = float(ffmpeg.probe(intro_file)['streams'][0]['duration'])
-    main_duration = float(main_info['streams'][0]['duration'])
+    main_duration = float(ffmpeg.probe(main_file)['streams'][0]['duration'])
     outro_duration = float(ffmpeg.probe(outro_file)['streams'][0]['duration'])
     total_duration = intro_duration + main_duration + outro_duration
 
@@ -371,7 +372,7 @@ def combine_videos(main_video: str, output_path: str, custom_bg_music: str = Non
         .filter('fade', type='out', start_time=main_duration-fade_duration, duration=fade_duration)
     )
 
-    video = ffmpeg.concat(intro['v'], main_with_fade, outro['v'], v=1, a=0)
+    video = ffmpeg.concat(intro, main_with_fade, outro)
 
     bg_music_files = []
     current_duration = 0
@@ -427,8 +428,13 @@ def combine_videos(main_video: str, output_path: str, custom_bg_music: str = Non
 
     mixed_audio = ffmpeg.filter([original_audio, bg_music_adjusted], 'amix', inputs=2)
 
-    output = ffmpeg.output(video, mixed_audio, output_path, format='mp4', r=fps)
-    ffmpeg.run(output, overwrite_output=True)
+    output = ffmpeg.output(video, mixed_audio, output_path, format='mp4')
+    
+    try:
+        ffmpeg.run(output, overwrite_output=True, capture_stdout=True, capture_stderr=True)
+    except ffmpeg.Error as e:
+        print(f"FFmpeg stderr:\n{e.stderr.decode()}")
+        raise Exception(f"FFmpeg command failed: {e.stderr.decode()}")
 
 def is_landscape(width, height, rotation):
     if rotation in [90, 270]:
