@@ -55,6 +55,7 @@ class Video(Base):
     weapon = Column(String)
     map_name = Column(String)
     thumbnail = Column(String)
+    background_music = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -174,20 +175,6 @@ def process_queue():
         else:
             time.sleep(5)
 
-# Caching decorator
-def cache_response(expire_time=3600):
-    def decorator(func):
-        async def wrapper(*args, **kwargs):
-            cache_key = f"cache:{func.__name__}:{str(args)}:{str(kwargs)}"
-            cached_result = redis_client.get(cache_key)
-            if cached_result:
-                return json.loads(cached_result)
-            result = await func(*args, **kwargs)
-            redis_client.setex(cache_key, expire_time, json.dumps(result))
-            return result
-        return wrapper
-    return decorator
-
 def check_and_set_permissions(directories):
        for dir in directories:
            if not os.path.exists(dir):
@@ -266,10 +253,17 @@ def process_video_background(filename: str, db: Session, video_id: int):
         print(f"Adjusting aspect ratio: {file_path} -> {adjusted_path}")
         adjust_aspect_ratio(file_path, adjusted_path)
 
+        # Check if custom background music was provided
+        custom_bg_music = None
+        if db_video.background_music:
+            custom_bg_music = os.path.join(MUSIC_DIR, db_video.background_music)
+            if not os.path.exists(custom_bg_music):
+                print(f"Custom background music not found: {custom_bg_music}")
+                custom_bg_music = None
+
         # Step 3: Combine videos (add intro, outro, watermark, background music)
         print(f"Combining videos: {adjusted_path} -> {output_path}")
-        bg_music_path = get_random_music()
-        combine_videos(adjusted_path, output_path, bg_music_path)
+        combine_videos(adjusted_path, output_path, custom_bg_music)
 
         # Step 4: Generate thumbnail
         print(f"Generating thumbnail: {file_path} -> {thumbnail_path}")
@@ -445,14 +439,39 @@ async def upload_video(
     map_name: str = Form(...),
     background_music: Union[UploadFile, str, None] = FormAlias(default=None),
 ):
-    if not file.filename.lower().endswith(('.mp4')):
-        raise HTTPException(status_code=400, detail="Invalid file format. Please upload a video file.")
+    # Save the uploaded file temporarily
+    temp_file_path = os.path.join(UPLOAD_DIR, f"temp_{file.filename}")
+    with open(temp_file_path, "wb") as buffer:
+        buffer.write(await file.read())
+
+    try:
+        # Use FFmpeg to probe the file
+        probe = ffmpeg.probe(temp_file_path)
+        video_stream = next((stream for stream in probe['streams'] if stream['codec_type'] == 'video'), None)
+        if video_stream is None:
+            raise ValueError("No video stream found in the uploaded file")
+    except Exception as e:
+        os.remove(temp_file_path)  # Clean up the temporary file
+        raise HTTPException(status_code=400, detail=f"Invalid video file: {str(e)}")
     
     file_uuid = uuid.uuid4()
     file_extension = os.path.splitext(file.filename)[1]
     safe_filename = f"{file_uuid}{file_extension}"
     
     file_path = os.path.join(UPLOAD_DIR, safe_filename)
+    os.rename(temp_file_path, file_path)
+
+    bg_music_path = None
+    if background_music:
+        bg_music_uuid = uuid.uuid4()
+        bg_music_extension = os.path.splitext(background_music.filename)[1]
+        bg_music_filename = f"{bg_music_uuid}{bg_music_extension}"
+        bg_music_path = os.path.join(MUSIC_DIR, bg_music_filename)
+        
+        with open(bg_music_path, "wb") as buffer:
+            buffer.write(await background_music.read())
+        
+        print(f"Background music file saved: {bg_music_path}, Size: {os.path.getsize(bg_music_path)} bytes")
     
     db_video = Video(
         filename=safe_filename,
@@ -460,7 +479,8 @@ async def upload_video(
         account_name=account_name,
         game_mode=game_mode,
         weapon=weapon,
-        map_name=map_name
+        map_name=map_name,
+        background_music=bg_music_filename if bg_music_path else None
     )
     db.add(db_video)
     db.commit()
@@ -507,7 +527,6 @@ async def get_video_status(video_id: int, db: Session = Depends(get_db)):
     return status_data
 
 @app.get("/videos")
-@cache_response(expire_time=300)  # Cache for 5 minutes
 def list_videos(db: Session = Depends(get_db)):
     videos = db.query(Video).filter(Video.status.in_([VideoStatus.COMPLETED, VideoStatus.APPROVED, VideoStatus.REJECTED])).all()
     return [{
