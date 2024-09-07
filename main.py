@@ -119,15 +119,19 @@ def process_queue():
                         db_video = db.query(Video).filter(Video.id == video_id).first()
                         if db_video and db_video.status == VideoStatus.PENDING:
                             process_video_background(db_video.filename, db, video_id)
+                        else:
+                            print(f"Skipping video {video_id}: status is {db_video.status if db_video else 'None'}")
+                    except Exception as e:
+                        print(f"Error processing video {video_id}: {str(e)}")
                     finally:
                         db.close()
                 else:
-                    # No more videos in the queue, sleep for a bit before checking again
+                    print("No videos in queue, waiting...")
                     time.sleep(5)
             finally:
                 release_lock()
         else:
-            # Another instance is processing, wait and try again
+            print("Could not acquire lock, waiting...")
             time.sleep(5)
 
 # Caching decorator
@@ -435,7 +439,10 @@ async def upload_video(
         "queue_position": queue_position
     }))
 
-    background_tasks.add_task(process_queue)
+    # Ensure the queue processing is running
+    if not hasattr(app.state, "queue_processing_started"):
+        background_tasks.add_task(start_queue_processing)
+        app.state.queue_processing_started = True
     
     return {"video_id": db_video.id, "status": VideoStatus.PENDING, "queue_position": queue_position}
 
@@ -574,18 +581,9 @@ async def startup_event():
     if not check_ffmpeg():
         print("Warning: FFmpeg is not installed or not accessible. Video processing may fail.")
 
-@app.on_event("startup")
-async def startup_event():
     check_and_set_permissions([UPLOAD_DIR, OUTPUT_DIR, THUMBNAIL_DIR])
 
-@app.on_event("startup")
-def start_queue_processing():
-    import threading
-    threading.Thread(target=process_queue, daemon=True).start()
-
-# Modify the existing startup event or add a new one
-@app.on_event("startup")
-async def requeue_pending_videos():
+    # Requeue pending videos
     db = SessionLocal()
     try:
         pending_videos = db.query(Video).filter(Video.status == VideoStatus.PENDING).all()
@@ -594,6 +592,11 @@ async def requeue_pending_videos():
         print(f"Requeued {len(pending_videos)} pending videos on startup")
     finally:
         db.close()
+
+    # Start queue processing
+    import threading
+    threading.Thread(target=process_queue, daemon=True).start()
+    app.state.queue_processing_started = True
 
 
 port = int(os.environ.get("PORT", 8000))
