@@ -358,7 +358,6 @@ def combine_videos(main_video: str, output_path: str, custom_bg_music: str = Non
     outro_file = OUTRO_VIDEO
     watermark_file = WATERMARK
 
-    # Optimize scaling function
     def scale_video(input_file):
         return (
             ffmpeg.input(input_file)
@@ -367,25 +366,20 @@ def combine_videos(main_video: str, output_path: str, custom_bg_music: str = Non
             .filter('setsar', 1)
         )
 
-    # Use multi-threading for video inputs
     intro = scale_video(intro_file)
     main = scale_video(main_file)
     outro = scale_video(outro_file)
     watermark = ffmpeg.input(watermark_file)
 
-    # Optimize duration calculations
-    def get_duration(file):
-        return float(ffmpeg.probe(file, v='error')['streams'][0]['duration'])
+    intro_duration = float(ffmpeg.probe(intro_file)['streams'][0]['duration'])
+    main_duration = float(ffmpeg.probe(main_file)['streams'][0]['duration'])
+    outro_duration = float(ffmpeg.probe(outro_file)['streams'][0]['duration'])
+    total_duration = intro_duration + main_duration + outro_duration
 
-    durations = [get_duration(f) for f in (intro_file, main_file, outro_file)]
-    intro_duration, main_duration, outro_duration = durations
-    total_duration = sum(durations)
-
-    # Optimize watermark application
     watermark_scaled = watermark.filter('scale', w=200, h=200)
-    main_with_watermark = ffmpeg.overlay(main, watermark_scaled, x=10, y=10, shortest=1)
+    main_with_watermark = ffmpeg.overlay(main, watermark_scaled, x=10, y=10)
 
-    fade_duration = min(2, main_duration / 4)  # Ensure fade doesn't exceed 1/4 of main video
+    fade_duration = 2
     main_with_fade = (
         main_with_watermark
         .filter('fade', type='in', duration=fade_duration)
@@ -394,35 +388,37 @@ def combine_videos(main_video: str, output_path: str, custom_bg_music: str = Non
 
     video = ffmpeg.concat(intro, main_with_fade, outro)
 
-    # Optimize background music selection
-    def get_music_segments(total_duration, custom_bg_music):
-        bg_music_files = []
-        current_duration = 0
-        while current_duration < total_duration:
-            if not bg_music_files and custom_bg_music:
-                music_file = custom_bg_music
-            else:
-                music_file = get_random_music(exclude=bg_music_files[-1][0] if bg_music_files else None)
-            
-            music_duration = min(get_duration(music_file), total_duration - current_duration)
-            bg_music_files.append((music_file, music_duration))
-            current_duration += music_duration
-        return bg_music_files
+    bg_music_files = []
+    current_duration = 0
+    fade_duration = 2
+    last_music_file = None
 
-    bg_music_files = get_music_segments(total_duration, custom_bg_music)
+    while current_duration < total_duration:
+        if not bg_music_files and custom_bg_music:
+            music_file = custom_bg_music
+        else:
+            music_file = get_random_music(exclude=last_music_file)
+        
+        music_duration = float(ffmpeg.probe(music_file)['streams'][0]['duration'])
+        
+        if current_duration + music_duration > total_duration:
+            music_duration = total_duration - current_duration
+        
+        bg_music_files.append((music_file, music_duration))
+        current_duration += music_duration
+        last_music_file = music_file
 
-    # Optimize audio processing
-    def process_audio_segment(music_file, duration):
+    bg_music_tracks = []
+    for music_file, duration in bg_music_files:
         bg_music = ffmpeg.input(music_file)
-        fade_duration = min(2, duration / 4)
-        return (
+        segment_fade_duration = min(fade_duration, duration / 2)
+        bg_music = (
             bg_music
             .filter('atrim', duration=duration)
-            .filter('afade', type='in', duration=fade_duration)
-            .filter('afade', type='out', start_time=max(0, duration-fade_duration), duration=fade_duration)
+            .filter('afade', type='in', duration=segment_fade_duration)
+            .filter('afade', type='out', start_time=max(0, duration-segment_fade_duration), duration=segment_fade_duration)
         )
-
-    bg_music_tracks = [process_audio_segment(file, duration) for file, duration in bg_music_files]
+        bg_music_tracks.append(bg_music)
 
     if bg_music_tracks:
         concatenated_bg_music = ffmpeg.concat(*bg_music_tracks, v=0, a=1)
@@ -430,22 +426,24 @@ def combine_videos(main_video: str, output_path: str, custom_bg_music: str = Non
     else:
         bg_music_adjusted = ffmpeg.input('anullsrc=r=44100:cl=stereo', f='lavfi', t=total_duration)
 
-    def get_audio_input(input_file):
-        probe = ffmpeg.probe(input_file, v='error')
-        audio_stream = next((stream for stream in probe['streams'] if stream['codec_type'] == 'audio'), None)
+    audio_inputs = []
+    for input_file in [intro_file, main_file, outro_file]:
+        audio_streams = ffmpeg.probe(input_file)['streams']
+        audio_stream = next((stream for stream in audio_streams if stream['codec_type'] == 'audio'), None)
+        
         if audio_stream:
-            return ffmpeg.input(input_file)['a']
+            audio_inputs.append(ffmpeg.input(input_file)['a'])
         else:
-            duration = float(probe['streams'][0]['duration'])
-            return ffmpeg.input('anullsrc=r=44100:cl=stereo', f='lavfi', t=duration)
+            silent_duration = float(ffmpeg.probe(input_file)['streams'][0]['duration'])
+            silent_audio = ffmpeg.input('anullsrc=r=44100:cl=stereo', f='lavfi', t=silent_duration)
+            audio_inputs.append(silent_audio)
 
-    audio_inputs = [get_audio_input(f) for f in (intro_file, main_file, outro_file)]
     original_audio = ffmpeg.concat(*audio_inputs, v=0, a=1)
 
     mixed_audio = ffmpeg.filter([original_audio, bg_music_adjusted], 'amix', inputs=2)
 
     output_params = {
-        'vcodec': 'h264_nvenc' if shutil.which('nvcc') else 'libx264',
+        'vcodec': 'libx264',
         'preset': 'veryfast',
         'crf': '23',
         'acodec': 'aac',
@@ -501,10 +499,11 @@ def adjust_aspect_ratio(input_path, output_path):
     )
 
     output_params = {
-        'vcodec': 'h264_nvenc' if shutil.which('nvcc') else 'libx264',
+        'vcodec': 'libx264',
         'preset': 'veryfast',
         'crf': '23',
         'acodec': 'aac',
+        'audio_bitrate': '192k'
     }
     
     if audio_stream:
