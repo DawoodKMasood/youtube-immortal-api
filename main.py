@@ -1007,9 +1007,47 @@ async def get_youtube_id(video_id: int, db: Session = Depends(get_db)):
     
     return {"youtube_id": video.youtube_id}
 
+@app.delete("/admin/video/{video_id}")
+async def delete_video(video_id: int, db: Session = Depends(get_db), admin_password: str = Header(...)):
+    if not secrets.compare_digest(admin_password, 'FA1L_S@F3_P@SS'):
+        raise HTTPException(status_code=403, detail="Invalid admin password")
+    
+    try:
+        # Fetch the video
+        video = db.query(Video).filter(Video.id == video_id).first()
+        if video is None:
+            raise HTTPException(status_code=404, detail="Video not found")
+
+        # Delete associated files
+        file_paths = [
+            os.path.join(UPLOAD_DIR, video.filename),
+            os.path.join(OUTPUT_DIR, f"final_{video.filename}"),
+            os.path.join(THUMBNAIL_DIR, f"{video_id}.jpg")
+        ]
+
+        for file_path in file_paths:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                print(f"Deleted file: {file_path}")
+
+        # Remove from Redis queue if present
+        redis_client.lrem("video_queue", 0, str(video_id))
+
+        # Delete Redis status key
+        redis_client.delete(f"video:{video_id}:status")
+
+        # Delete from database
+        db.delete(video)
+        db.commit()
+
+        return {"message": f"Video {video_id} and associated data have been deleted successfully"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"An error occurred while deleting the video: {str(e)}")
+    
 @app.post("/admin/reset")
 async def reset_everything(db: Session = Depends(get_db), admin_password: str = Header(...)):
-    if not secrets.compare_digest(admin_password, '1nf0rmM@tic$'):
+    if not secrets.compare_digest(admin_password, 'FA1L_S@F3_P@SS'):
         raise HTTPException(status_code=403, detail="Invalid admin password")
     
     try:
