@@ -364,6 +364,7 @@ def combine_videos(main_video: str, output_path: str, custom_bg_music: str = Non
             .filter('scale', 1920, 1080, force_original_aspect_ratio='decrease')  # Maintain aspect ratio
             .filter('pad', 1920, 1080, '(ow-iw)/2', '(oh-ih)/2')  # Center the video
             .filter('setsar', 1)
+            .filter('fps', fps=30)
         )
 
     intro = scale_video(intro_file)
@@ -447,7 +448,8 @@ def combine_videos(main_video: str, output_path: str, custom_bg_music: str = Non
         'preset': 'veryfast',
         'crf': '23',
         'acodec': 'aac',
-        'audio_bitrate': '192k'
+        'audio_bitrate': '192k',
+        'r': 30
     }
 
     output = ffmpeg.output(video, mixed_audio, output_path, **output_params)
