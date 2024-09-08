@@ -22,6 +22,7 @@ import googleapiclient.errors
 from google.oauth2.credentials import Credentials
 from googleapiclient.http import MediaFileUpload
 from google_auth_oauthlib.flow import Flow
+from starlette.responses import RedirectResponse
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
@@ -141,20 +142,28 @@ def get_authenticated_service():
                         "client_secret": YOUTUBE_CLIENT_SECRET,
                         "auth_uri": "https://accounts.google.com/o/oauth2/auth",
                         "token_uri": "https://oauth2.googleapis.com/token",
-                        "redirect_uris": ["http://localhost:8080/", "https://immortals-cod-api.playwox.com"]
+                        "redirect_uris": ["https://immortals-cod-api.playwox.com/oauth2callback"]
                     }
                 },
                 scopes=scopes
             )
-            creds = flow.run_local_server(port=8080)
+            # Instead of running a local server, we'll need to handle this in a separate route
+            auth_url, _ = flow.authorization_url(prompt='consent')
+            raise Exception(f"Please visit this URL to authorize the application: {auth_url}")
         
+        # Save the credentials for the next run
         with open("token.json", "w") as token:
             token.write(creds.to_json())
-    
+
     return build("youtube", "v3", credentials=creds)
 
 def upload_to_youtube(file_path, title, description, category_id="22"):
-    youtube = get_authenticated_service()
+    try:
+        youtube = get_authenticated_service()
+    except Exception as e:
+        if "Please visit this URL to authorize" in str(e):
+            raise HTTPException(status_code=401, detail=str(e))
+        raise
     
     request_body = {
         'snippet': {
@@ -888,7 +897,7 @@ async def upload_video_chunk(
             weapon=weapon,
             map_name=map_name
         )
-        
+
         db.add(db_video)
         db.commit()
         db.refresh(db_video)
@@ -1107,6 +1116,40 @@ async def health_check(db: Session = Depends(get_db)):
         health_status["status"] = "unhealthy"
 
     return health_status
+
+# Add a new route to handle the OAuth2 callback
+@app.get("/oauth2callback")
+async def oauth2callback(request: Request, db: Session = Depends(get_db)):
+    if os.path.exists("token.json"):
+        creds = Credentials.from_authorized_user_file("token.json", scopes)
+        if creds and creds.valid:
+            return {"message": "Existing valid credentials found. No action needed."}
+        elif creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            with open("token.json", "w") as token:
+                token.write(creds.to_json())
+            return {"message": "Existing credentials refreshed. No further action needed."}
+        
+    flow = Flow.from_client_config(
+        {
+            "web": {
+                "client_id": YOUTUBE_CLIENT_ID,
+                "client_secret": YOUTUBE_CLIENT_SECRET,
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "redirect_uris": ["https://immortals-cod-api.playwox.com/oauth2callback"]
+            }
+        },
+        scopes=scopes
+    )
+    
+    flow.fetch_token(code=request.query_params.get("code"))
+    
+    creds = flow.credentials
+    with open("token.json", "w") as token:
+        token.write(creds.to_json())
+    
+    return {"message": "Authentication successful. You can now close this window."}
 
 @app.on_event("startup")
 async def startup_event():
