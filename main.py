@@ -789,7 +789,7 @@ async def get_video_status(video_id: int, db: Session = Depends(get_db)):
 
 @app.get("/videos")
 def list_videos(db: Session = Depends(get_db)):
-    videos = db.query(Video).filter(Video.status.in_([VideoStatus.COMPLETED, VideoStatus.APPROVED, VideoStatus.REJECTED])).all()
+    videos = db.query(Video).all()
     return [{
         "id": video.id,
         "status": video.status,
@@ -870,30 +870,11 @@ async def health_check(db: Session = Depends(get_db)):
     }
 
     try:
-        # Check database connection
         db.execute(text("SELECT 1"))
         health_status["checks"]["database"] = "connected"
     except Exception as e:
         health_status["status"] = "unhealthy"
         health_status["checks"]["database"] = f"error: {str(e)}"
-
-    # Check required directories
-    required_dirs = [UPLOAD_DIR, OUTPUT_DIR, THUMBNAIL_DIR, MUSIC_DIR]
-    for dir_name in required_dirs:
-        if os.path.exists(dir_name) and os.path.isdir(dir_name):
-            health_status["checks"][dir_name] = "exists"
-        else:
-            health_status["status"] = "unhealthy"
-            health_status["checks"][dir_name] = "missing"
-
-    # Check for required files
-    required_files = [INTRO_VIDEO, OUTRO_VIDEO, WATERMARK]
-    for file_name in required_files:
-        if os.path.exists(file_name) and os.path.isfile(file_name):
-            health_status["checks"][file_name] = "exists"
-        else:
-            health_status["status"] = "unhealthy"
-            health_status["checks"][file_name] = "missing"
 
     try:
         redis_client.ping()
@@ -902,16 +883,20 @@ async def health_check(db: Session = Depends(get_db)):
         health_status["status"] = "unhealthy"
         health_status["checks"]["redis"] = f"error: {str(e)}"
 
-    # Check CPU usage
     cpu_usage = psutil.cpu_percent()
     health_status["checks"]["cpu_usage"] = f"{cpu_usage}%"
     if cpu_usage > 80:
         health_status["status"] = "unhealthy"
 
-    # Check memory usage
     memory_usage = psutil.virtual_memory().percent
     health_status["checks"]["memory_usage"] = f"{memory_usage}%"
     if memory_usage > 80:
+        health_status["status"] = "unhealthy"
+    
+    disk_usage = psutil.disk_usage('/')
+    free_disk_percent = 100 - disk_usage.percent
+    health_status["checks"]["disk_space"] = f"{free_disk_percent:.1f}% free"
+    if free_disk_percent < 10:
         health_status["status"] = "unhealthy"
 
     return health_status
