@@ -6,3 +6,4 @@ alembic/versions/__pycache__/*
 alembic.ini
 .env
 __pycache__
+token.json

@@ -18,8 +18,13 @@ import redis
 import google_auth_oauthlib.flow
 import googleapiclient.discovery
 import googleapiclient.errors
-from google.oauth2.credentials import Credentials
 
+from google.oauth2.credentials import Credentials
+from googleapiclient.http import MediaFileUpload
+from google_auth_oauthlib.flow import Flow
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from google.auth.transport.requests import Request
 from fastapi import FastAPI, File, Query, UploadFile, HTTPException, Depends, Form, BackgroundTasks, Header
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, Enum, desc, text
@@ -34,8 +39,8 @@ from sqlalchemy import Index
 # Load environment variables from .env file
 load_dotenv()
 
-YOUTUBE_CLIENT_SECRETS_FILE = os.getenv("YOUTUBE_CLIENT_SECRETS_FILE")
-YOUTUBE_TOKEN_FILE = os.getenv("YOUTUBE_TOKEN_FILE")
+YOUTUBE_CLIENT_ID = os.getenv("YOUTUBE_CLIENT_ID")
+YOUTUBE_CLIENT_SECRET = os.getenv("YOUTUBE_CLIENT_SECRET")
 
 # Get the database URL from the environment variable
 SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL")
@@ -121,11 +126,32 @@ PROCESSING_LOCK_KEY = "video_processing_lock"
 
 
 def get_authenticated_service():
-    flow = google_auth_oauthlib.flow.Flow.from_client_secrets_file(
-        YOUTUBE_CLIENT_SECRETS_FILE, scopes)
-    flow.run_local_server(port=8080, prompt="consent", authorization_prompt_message="")
-    credentials = flow.credentials
-    return googleapiclient.discovery.build("youtube", "v3", credentials=credentials)
+    creds = None
+    if os.path.exists("token.json"):
+        creds = Credentials.from_authorized_user_file("token.json", scopes)
+    
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = Flow.from_client_config(
+                {
+                    "web": {
+                        "client_id": YOUTUBE_CLIENT_ID,
+                        "client_secret": YOUTUBE_CLIENT_SECRET,
+                        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                        "token_uri": "https://oauth2.googleapis.com/token",
+                        "redirect_uris": ["http://localhost:8080/", "https://immortals-cod-api.playwox.com"]
+                    }
+                },
+                scopes=scopes
+            )
+            creds = flow.run_local_server(port=8080)
+        
+        with open("token.json", "w") as token:
+            token.write(creds.to_json())
+    
+    return build("youtube", "v3", credentials=creds)
 
 def upload_to_youtube(file_path, title, description, category_id="22"):
     youtube = get_authenticated_service()
@@ -142,15 +168,22 @@ def upload_to_youtube(file_path, title, description, category_id="22"):
         }
     }
 
-    media_file = MediaFileUpload(file_path)
+    media_file = MediaFileUpload(file_path, resumable=True)
     
     try:
-        response = youtube.videos().insert(
+        request = youtube.videos().insert(
             part="snippet,status",
             body=request_body,
             media_body=media_file
-        ).execute()
+        )
         
+        response = None
+        while response is None:
+            status, response = request.next_chunk()
+            if status:
+                print(f"Uploaded {int(status.progress() * 100)}%")
+        
+        print(f"Upload Complete! Video ID: {response['id']}")
         return response['id']
     except googleapiclient.errors.HttpError as e:
         print(f"An HTTP error {e.resp.status} occurred: {e.content}")
@@ -405,9 +438,21 @@ def process_video_background(filename: str, db: Session, video_id: int):
         db.commit()
 
         if db_video.status == VideoStatus.COMPLETED:
-            youtube_title = f"{db_video.game_mode} gameplay with {db_video.weapon} on {db_video.map_name}"
-            youtube_description = f"Gameplay video by {db_video.account_name}. Game mode: {db_video.game_mode}, Weapon: {db_video.weapon}, Map: {db_video.map_name}"
-            
+            youtube_title = f"Immortals COD: {db_video.game_mode} - {db_video.account_name}'s {db_video.weapon}"
+            youtube_description = f"""🔥 Immortals COD brings you another epic Call of Duty gameplay! 🔥
+
+            In this video, {db_video.account_name} dominates {db_video.game_mode} using {db_video.weapon}. 
+
+            🎮 Game Details:
+
+            Mode: {db_video.game_mode}
+            Map: {db_video.map_name}
+
+            👍 If you enjoyed this video, don't forget to like, comment, and subscribe to Immortals COD for more epic gameplays!
+            🔔 Turn on notifications to never miss an upload!
+
+            #ImmortalsCOD #CallOfDutyMobile"""
+
             youtube_video_id = upload_to_youtube(output_path, youtube_title, youtube_description)
             
             if youtube_video_id:
