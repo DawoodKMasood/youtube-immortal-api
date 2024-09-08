@@ -15,9 +15,9 @@ import json
 import psutil
 import redis
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Form, BackgroundTasks, Header
+from fastapi import FastAPI, File, Query, UploadFile, HTTPException, Depends, Form, BackgroundTasks, Header
 from fastapi.responses import FileResponse, JSONResponse
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Enum, text
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Enum, desc, text
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.ext.declarative import declarative_base
 import ffmpeg
@@ -788,18 +788,39 @@ async def get_video_status(video_id: int, db: Session = Depends(get_db)):
     return status_data
 
 @app.get("/videos")
-def list_videos(db: Session = Depends(get_db)):
-    videos = db.query(Video).all()
-    return [{
-        "id": video.id,
-        "status": video.status,
-        "account_name": video.account_name,
-        "game_mode": video.game_mode,
-        "weapon": video.weapon,
-        "map_name": video.map_name,
-        "created_at": video.created_at,
-        "updated_at": video.updated_at
-    } for video in videos]
+def list_videos(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(10, ge=1, le=100),
+    db: Session = Depends(get_db)
+):
+    # Calculate offset
+    offset = (page - 1) * per_page
+
+    # Query videos, ordered by created_at descending, with pagination
+    videos = db.query(Video).order_by(desc(Video.created_at)).offset(offset).limit(per_page).all()
+
+    # Get total count of videos
+    total_videos = db.query(Video).count()
+
+    # Calculate total pages
+    total_pages = (total_videos + per_page - 1) // per_page
+
+    return {
+        "videos": [{
+            "id": video.id,
+            "status": video.status,
+            "account_name": video.account_name,
+            "game_mode": video.game_mode,
+            "weapon": video.weapon,
+            "map_name": video.map_name,
+            "created_at": video.created_at,
+            "updated_at": video.updated_at
+        } for video in videos],
+        "page": page,
+        "per_page": per_page,
+        "total_videos": total_videos,
+        "total_pages": total_pages
+    }
 
 @app.get("/video/{video_id}/thumbnail")
 async def get_thumbnail(video_id: int, db: Session = Depends(get_db)):
