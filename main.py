@@ -122,7 +122,7 @@ PROCESSING_LOCK_KEY = "video_processing_lock"
 
 
 def get_authenticated_service():
-    SERVICE_ACCOUNT_FILE = 'path/to/your/service_account_key.json'
+    SERVICE_ACCOUNT_FILE = os.path.join(BASE_DIR, "service.json")
     scopes = ['https://www.googleapis.com/auth/youtube.upload']
     
     credentials = service_account.Credentials.from_service_account_file(
