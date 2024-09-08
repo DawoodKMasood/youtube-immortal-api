@@ -102,7 +102,7 @@ for directory in [UPLOAD_DIR, OUTPUT_DIR, THUMBNAIL_DIR]:
     os.makedirs(directory, exist_ok=True)
 
 # Thread pool for concurrent processing
-executor = ThreadPoolExecutor(max_workers=4)
+executor = ThreadPoolExecutor(max_workers=5)
 
 # Lock key for ensuring single video processing
 PROCESSING_LOCK_KEY = "video_processing_lock"
