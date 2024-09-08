@@ -15,13 +15,18 @@ import subprocess
 import json
 import psutil
 import redis
+import google_auth_oauthlib.flow
 import googleapiclient.discovery
 import googleapiclient.errors
 
+from google.oauth2.credentials import Credentials
 from googleapiclient.http import MediaFileUpload
-from google.oauth2 import service_account
+from google_auth_oauthlib.flow import Flow
+from starlette.responses import RedirectResponse
+from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
-from fastapi import FastAPI, File, Query, UploadFile, HTTPException, Depends, Form, Header
+from google.auth.transport.requests import Request as GoogleAuthRequest
+from fastapi import FastAPI, File, Query, Request, UploadFile, HTTPException, Depends, Form, BackgroundTasks, Header
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, Enum, desc, text
 from sqlalchemy.orm import sessionmaker, Session
@@ -122,13 +127,35 @@ PROCESSING_LOCK_KEY = "video_processing_lock"
 
 
 def get_authenticated_service():
-    SERVICE_ACCOUNT_FILE = os.path.join(BASE_DIR, "service.json")
-    scopes = ['https://www.googleapis.com/auth/youtube.upload']
+    creds = None
+    if os.path.exists("token.json"):
+        creds = Credentials.from_authorized_user_file("token.json", scopes)
     
-    credentials = service_account.Credentials.from_service_account_file(
-        SERVICE_ACCOUNT_FILE, scopes=scopes)
-    
-    return build('youtube', 'v3', credentials=credentials)
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = Flow.from_client_config(
+                {
+                    "web": {
+                        "client_id": YOUTUBE_CLIENT_ID,
+                        "client_secret": YOUTUBE_CLIENT_SECRET,
+                        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                        "token_uri": "https://oauth2.googleapis.com/token",
+                        "redirect_uris": ["https://immortals-cod-api.playwox.com/oauth2callback"]
+                    }
+                },
+                scopes=scopes
+            )
+            # Instead of running a local server, we'll need to handle this in a separate route
+            auth_url, _ = flow.authorization_url(prompt='consent')
+            raise Exception(f"Please visit this URL to authorize the application: {auth_url}")
+        
+        # Save the credentials for the next run
+        with open("token.json", "w") as token:
+            token.write(creds.to_json())
+
+    return build("youtube", "v3", credentials=creds)
 
 def upload_to_youtube(file_path, title, description, category_id="22"):
     try:
@@ -1089,6 +1116,39 @@ async def health_check(db: Session = Depends(get_db)):
         health_status["status"] = "unhealthy"
 
     return health_status
+
+@app.get("/oauth2callback")
+async def oauth2callback(request: Request, db: Session = Depends(get_db)):
+    if os.path.exists("token.json"):
+        creds = Credentials.from_authorized_user_file("token.json", scopes)
+        if creds and creds.valid:
+            return {"message": "Existing valid credentials found. No action needed."}
+        elif creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            with open("token.json", "w") as token:
+                token.write(creds.to_json())
+            return {"message": "Existing credentials refreshed. No further action needed."}
+        
+    flow = Flow.from_client_config(
+        {
+            "web": {
+                "client_id": YOUTUBE_CLIENT_ID,
+                "client_secret": YOUTUBE_CLIENT_SECRET,
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "redirect_uris": ["https://immortals-cod-api.playwox.com/oauth2callback"]
+            }
+        },
+        scopes=scopes
+    )
+    
+    flow.fetch_token(code=request.query_params.get("code"))
+    
+    creds = flow.credentials
+    with open("token.json", "w") as token:
+        token.write(creds.to_json())
+    
+    return {"message": "Authentication successful. You can now close this window."}
 
 @app.on_event("startup")
 async def startup_event():
