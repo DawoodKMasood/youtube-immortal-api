@@ -368,9 +368,9 @@ def combine_videos(main_video: str, output_path: str, custom_bg_music: str = Non
         )
 
     # Use multi-threading for video inputs
-    intro = scale_video(intro_file).filter('threads', 2)
-    main = scale_video(main_file).filter('threads', 2)
-    outro = scale_video(outro_file).filter('threads', 2)
+    intro = scale_video(intro_file)
+    main = scale_video(main_file)
+    outro = scale_video(outro_file)
     watermark = ffmpeg.input(watermark_file)
 
     # Optimize duration calculations
