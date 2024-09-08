@@ -1,3 +1,4 @@
+import asyncio
 import os
 import random
 import shutil
@@ -14,6 +15,10 @@ import subprocess
 import json
 import psutil
 import redis
+import google_auth_oauthlib.flow
+import googleapiclient.discovery
+import googleapiclient.errors
+from google.oauth2.credentials import Credentials
 
 from fastapi import FastAPI, File, Query, UploadFile, HTTPException, Depends, Form, BackgroundTasks, Header
 from fastapi.responses import FileResponse, JSONResponse
@@ -29,6 +34,9 @@ from sqlalchemy import Index
 # Load environment variables from .env file
 load_dotenv()
 
+YOUTUBE_CLIENT_SECRETS_FILE = os.getenv("YOUTUBE_CLIENT_SECRETS_FILE")
+YOUTUBE_TOKEN_FILE = os.getenv("YOUTUBE_TOKEN_FILE")
+
 # Get the database URL from the environment variable
 SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL")
 engine = create_engine(SQLALCHEMY_DATABASE_URL)
@@ -39,6 +47,8 @@ Base = declarative_base()
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 redis_client = redis.from_url(REDIS_URL)
 
+scopes = ["https://www.googleapis.com/auth/youtube.upload"]
+
 # Model
 class VideoStatus(str, PyEnum):
     PENDING = "PENDING"
@@ -48,6 +58,7 @@ class VideoStatus(str, PyEnum):
     FAILED = "FAILED"
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
+    UPLOADED_TO_YOUTUBE = "UPLOADED_TO_YOUTUBE"
 
 class Video(Base):
     __tablename__ = "videos"
@@ -61,6 +72,7 @@ class Video(Base):
     map_name = Column(String)
     thumbnail = Column(String)
     background_music = Column(String)
+    youtube_id = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -107,6 +119,43 @@ executor = ThreadPoolExecutor(max_workers=5)
 # Lock key for ensuring single video processing
 PROCESSING_LOCK_KEY = "video_processing_lock"
 
+
+def get_authenticated_service():
+    flow = google_auth_oauthlib.flow.Flow.from_client_secrets_file(
+        YOUTUBE_CLIENT_SECRETS_FILE, scopes)
+    flow.run_local_server(port=8080, prompt="consent", authorization_prompt_message="")
+    credentials = flow.credentials
+    return googleapiclient.discovery.build("youtube", "v3", credentials=credentials)
+
+def upload_to_youtube(file_path, title, description, category_id="22"):
+    youtube = get_authenticated_service()
+    
+    request_body = {
+        'snippet': {
+            'title': title,
+            'description': description,
+            'categoryId': category_id
+        },
+        'status': {
+            'privacyStatus': 'private',
+            'selfDeclaredMadeForKids': False,
+        }
+    }
+
+    media_file = MediaFileUpload(file_path)
+    
+    try:
+        response = youtube.videos().insert(
+            part="snippet,status",
+            body=request_body,
+            media_body=media_file
+        ).execute()
+        
+        return response['id']
+    except googleapiclient.errors.HttpError as e:
+        print(f"An HTTP error {e.resp.status} occurred: {e.content}")
+        return None
+    
 def validate_file_integrity(file_path):
     try:
         file_size = os.path.getsize(file_path)
@@ -355,6 +404,24 @@ def process_video_background(filename: str, db: Session, video_id: int):
         db_video.thumbnail = os.path.basename(thumbnail_path)
         db.commit()
 
+        if db_video.status == VideoStatus.COMPLETED:
+            youtube_title = f"{db_video.game_mode} gameplay with {db_video.weapon} on {db_video.map_name}"
+            youtube_description = f"Gameplay video by {db_video.account_name}. Game mode: {db_video.game_mode}, Weapon: {db_video.weapon}, Map: {db_video.map_name}"
+            
+            youtube_video_id = upload_to_youtube(output_path, youtube_title, youtube_description)
+            
+            if youtube_video_id:
+                db_video.youtube_id = youtube_video_id
+                db_video.status = VideoStatus.UPLOADED_TO_YOUTUBE
+                db.commit()
+                
+                redis_client.setex(f"video:{video_id}:status", 3600, json.dumps({
+                    "status": VideoStatus.UPLOADED_TO_YOUTUBE,
+                    "youtube_id": youtube_video_id
+                }))
+            else:
+                print(f"Failed to upload video {video_id} to YouTube")
+
         redis_client.setex(f"video:{video_id}:status", 3600, json.dumps({
             "status": VideoStatus.COMPLETED,
             "queue_position": 0
@@ -386,6 +453,40 @@ def process_video_background(filename: str, db: Session, video_id: int):
 
         # Signal that processing is complete
         redis_client.publish('video_processed', video_id)
+
+def cleanup_stale_chunks():
+    chunk_dir = os.path.join(UPLOAD_DIR, "chunks")
+    music_chunk_dir = os.path.join(MUSIC_DIR, "chunks")
+    
+    # Get current time
+    now = time.time()
+    
+    # Cleanup video chunks
+    cleanup_directory_chunks(chunk_dir, now)
+    
+    # Cleanup music chunks
+    cleanup_directory_chunks(music_chunk_dir, now)
+
+def cleanup_directory_chunks(directory, current_time):
+    if not os.path.exists(directory):
+        return
+
+    for filename in os.listdir(directory):
+        file_path = os.path.join(directory, filename)
+        
+        # Check if the file is older than 1 hour
+        if os.path.isfile(file_path) and (current_time - os.path.getmtime(file_path)) > 3600:
+            try:
+                os.remove(file_path)
+                print(f"Removed stale chunk: {file_path}")
+            except Exception as e:
+                print(f"Error removing stale chunk {file_path}: {str(e)}")
+
+    # Remove any related Redis keys
+    for key in redis_client.scan_iter("upload:*"):
+        if (current_time - redis_client.ttl(key)) > 3600:
+            redis_client.delete(key)
+            print(f"Removed stale Redis key: {key}")
 
 def combine_videos(main_video: str, output_path: str, custom_bg_music: str = None):
     intro_file = INTRO_VIDEO
@@ -813,6 +914,7 @@ def list_videos(
             "game_mode": video.game_mode,
             "weapon": video.weapon,
             "map_name": video.map_name,
+            "youtube_id": video.youtube_id,
             "created_at": video.created_at,
             "updated_at": video.updated_at
         } for video in videos],
@@ -848,6 +950,17 @@ async def download_video(video_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Video file not found")
     
     return FileResponse(video_path, media_type="video/mp4", filename=f"processed_{video.filename}")
+
+@app.get("/video/{video_id}/youtube")
+async def get_youtube_id(video_id: int, db: Session = Depends(get_db)):
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if video is None:
+        raise HTTPException(status_code=404, detail="Video not found")
+    
+    if video.youtube_id is None:
+        raise HTTPException(status_code=404, detail="Video not uploaded to YouTube")
+    
+    return {"youtube_id": video.youtube_id}
 
 @app.post("/admin/reset")
 async def reset_everything(db: Session = Depends(get_db), admin_password: str = Header(...)):
@@ -952,6 +1065,13 @@ async def startup_event():
     redis_client.delete("video_processing_lock")
     print("Cleared existing locks on startup")
 
+    # Start periodic cleanup
+    asyncio.create_task(periodic_cleanup())
+
+async def periodic_cleanup():
+    while True:
+        cleanup_stale_chunks()
+        await asyncio.sleep(3600)  # Run every hour
 
 port = int(os.environ.get("PORT", 8000))
 
