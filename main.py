@@ -26,7 +26,7 @@ from starlette.responses import RedirectResponse
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request as GoogleAuthRequest
-from fastapi import FastAPI, File, Query, UploadFile, HTTPException, Depends, Form, BackgroundTasks, Header
+from fastapi import FastAPI, File, Query, Request, UploadFile, HTTPException, Depends, Form, BackgroundTasks, Header
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, Enum, desc, text
 from sqlalchemy.orm import sessionmaker, Session
@@ -133,7 +133,7 @@ def get_authenticated_service():
     
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(GoogleAuthRequest())
+            creds.refresh(Request())
         else:
             flow = Flow.from_client_config(
                 {
@@ -1118,13 +1118,13 @@ async def health_check(db: Session = Depends(get_db)):
     return health_status
 
 @app.get("/oauth2callback")
-async def oauth2callback(request: GoogleAuthRequest, db: Session = Depends(get_db)):
+async def oauth2callback(request: Request, db: Session = Depends(get_db)):
     if os.path.exists("token.json"):
         creds = Credentials.from_authorized_user_file("token.json", scopes)
         if creds and creds.valid:
             return {"message": "Existing valid credentials found. No action needed."}
         elif creds and creds.expired and creds.refresh_token:
-            creds.refresh(GoogleAuthRequest())
+            creds.refresh(Request())
             with open("token.json", "w") as token:
                 token.write(creds.to_json())
             return {"message": "Existing credentials refreshed. No further action needed."}
