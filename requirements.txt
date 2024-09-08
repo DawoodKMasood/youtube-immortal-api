@@ -6,3 +6,4 @@ python-dotenv
 uvicorn
 psycopg2-binary
 redis
+psutil
