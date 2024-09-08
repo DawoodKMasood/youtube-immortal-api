@@ -7,7 +7,7 @@ import uuid
 import secrets
 from enum import Enum as PyEnum
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Union
 import subprocess
@@ -170,12 +170,36 @@ def clean_queue():
         db.close()
     print(f"Cleaned queue. Current queue: {redis_client.lrange('video_queue', 0, -1)}")
 
+def check_and_update_long_running_processes(db: Session):
+    thirty_minutes_ago = datetime.utcnow() - timedelta(minutes=30)
+    long_running_videos = db.query(Video).filter(
+        Video.status == VideoStatus.PROCESSING,
+        Video.updated_at <= thirty_minutes_ago
+    ).all()
+
+    for video in long_running_videos:
+        video.status = VideoStatus.FAILED
+        redis_client.setex(f"video:{video.id}:status", 3600, json.dumps({
+            "status": VideoStatus.FAILED,
+            "error_message": "Video processing timed out after 30 minutes"
+        }))
+        print(f"Video {video.id} marked as failed due to timeout")
+    
+    db.commit()
+    
 def process_queue():
     pubsub = redis_client.pubsub()
     pubsub.subscribe('video_processed')
     
     empty_queue_sleep_time = 30  # seconds
     while True:
+        # Check for long-running processes
+        db = SessionLocal()
+        try:
+            check_and_update_long_running_processes(db)
+        finally:
+            db.close()
+
         if redis_client.llen("video_queue") == 0:
             time.sleep(empty_queue_sleep_time)
             continue
@@ -190,6 +214,10 @@ def process_queue():
                     try:
                         db_video = db.query(Video).filter(Video.id == video_id).first()
                         if db_video and db_video.status == VideoStatus.PENDING:
+                            db_video.status = VideoStatus.PROCESSING
+                            db_video.updated_at = datetime.utcnow()
+                            db.commit()
+
                             process_video_background(db_video.filename, db, video_id)
                             
                             # Wait for the 'video_processed' signal
@@ -240,8 +268,13 @@ def get_random_music(exclude=None):
 
 def validate_video(file_path):
     info = get_video_info(file_path)
-    if info['fps'] < 30:
-        raise ValueError("Video frame rate must be at least 30 FPS")
+    
+    if info['width'] <= info['height']:
+        raise ValueError("Video must be in landscape orientation")
+    
+    if info['duration'] < 10:
+        raise ValueError("Video must be at least 10 seconds long")
+    
     return info
 
 def get_video_info(file_path):
@@ -271,6 +304,7 @@ def process_video_background(filename: str, db: Session, video_id: int):
     try:
         db_video = db.query(Video).filter(Video.id == video_id).first()
         db_video.status = VideoStatus.PROCESSING
+        db_video.updated_at = datetime.utcnow()  # Update the timestamp when processing starts
         db.commit()
 
         redis_client.setex(f"video:{video_id}:status", 3600, json.dumps({
@@ -331,6 +365,7 @@ def process_video_background(filename: str, db: Session, video_id: int):
         print(f"Error processing video {video_id}: {str(e)}")
         traceback.print_exc()
         db_video.status = VideoStatus.FAILED
+        db_video.updated_at = datetime.utcnow()  # Update the timestamp when processing fails
         db.commit()
 
         redis_client.setex(f"video:{video_id}:status", 3600, json.dumps({
@@ -358,13 +393,27 @@ def combine_videos(main_video: str, output_path: str, custom_bg_music: str = Non
     outro_file = OUTRO_VIDEO
     watermark_file = WATERMARK
 
+    def get_video_fps(file_path):
+        probe = ffmpeg.probe(file_path)
+        video_stream = next((stream for stream in probe['streams'] if stream['codec_type'] == 'video'), None)
+        if video_stream:
+            fps = eval(video_stream['r_frame_rate'])
+            return fps if isinstance(fps, (int, float)) else fps.numerator / fps.denominator
+        return None
+
+    main_fps = get_video_fps(main_file)
+    if main_fps is None:
+        raise ValueError("Could not determine frame rate of main video")
+
+    target_fps = min(30, main_fps)  # Use original FPS if less than 30, otherwise cap at 30
+
     def scale_video(input_file):
         return (
             ffmpeg.input(input_file)
-            .filter('scale', 1920, 1080, force_original_aspect_ratio='decrease')  # Maintain aspect ratio
-            .filter('pad', 1920, 1080, '(ow-iw)/2', '(oh-ih)/2')  # Center the video
+            .filter('scale', 1920, 1080, force_original_aspect_ratio='decrease')
+            .filter('pad', 1920, 1080, '(ow-iw)/2', '(oh-ih)/2')
             .filter('setsar', 1)
-            .filter('fps', fps=30)
+            .filter('fps', fps=target_fps)
         )
 
     intro = scale_video(intro_file)
@@ -449,7 +498,7 @@ def combine_videos(main_video: str, output_path: str, custom_bg_music: str = Non
         'crf': '23',
         'acodec': 'aac',
         'audio_bitrate': '192k',
-        'r': 30
+        'r': target_fps
     }
 
     output = ffmpeg.output(video, mixed_audio, output_path, **output_params)
