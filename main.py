@@ -856,15 +856,10 @@ async def upload_video_chunk(
     chunk_filename = f"{file_uuid}_{chunk_number}"
     chunk_path = os.path.join(chunk_dir, chunk_filename)
     
-    print(f"Receiving chunk {chunk_number} of {total_chunks} for file {unique_filename}")
-    
     with open(chunk_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
     
-    print(f"Saved chunk {chunk_number} to {chunk_path}")
-    
     if chunk_number == total_chunks:
-        print(f"All chunks received for {unique_filename}. Combining chunks...")
         final_filename = unique_filename
         final_path = os.path.join(UPLOAD_DIR, final_filename)
         
@@ -872,24 +867,18 @@ async def upload_video_chunk(
             for i in range(1, total_chunks + 1):
                 chunk_file = os.path.join(chunk_dir, f"{file_uuid}_{i}")
                 if os.path.exists(chunk_file):
-                    print(f"Appending chunk {i} to final file")
                     with open(chunk_file, "rb") as cf:
                         shutil.copyfileobj(cf, final_file)
                     os.remove(chunk_file)
-                    print(f"Removed chunk file {chunk_file}")
                 else:
                     print(f"Error: Chunk file {i} is missing")
                     raise HTTPException(status_code=400, detail=f"Chunk file {i} is missing")
-        
-        print(f"All chunks combined into {final_path}")
         
         redis_client.delete(f"upload:{filename}")
         
         if not validate_file_integrity(final_path):
             os.remove(final_path)
             raise HTTPException(status_code=400, detail="The uploaded file appears to be corrupt or incomplete. Please try uploading again.")
-        
-        print("File integrity validated")
         
         db_video = Video(
             filename=final_filename,
@@ -899,6 +888,7 @@ async def upload_video_chunk(
             weapon=weapon,
             map_name=map_name
         )
+        
         db.add(db_video)
         db.commit()
         db.refresh(db_video)
