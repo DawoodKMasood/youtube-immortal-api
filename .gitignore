@@ -7,3 +7,4 @@ alembic.ini
 .env
 __pycache__
 token.json
+service.json
