@@ -12,6 +12,8 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import List, Union
 import subprocess
 import json
+import psutil
+import redis
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Form, BackgroundTasks, Header
 from fastapi.responses import FileResponse, JSONResponse
@@ -22,7 +24,7 @@ import ffmpeg
 from dotenv import load_dotenv
 from fastapi.param_functions import Form as FormAlias
 from fastapi.middleware.cors import CORSMiddleware
-import redis
+from sqlalchemy import Index
 
 # Load environment variables from .env file
 load_dotenv()
@@ -61,6 +63,10 @@ class Video(Base):
     background_music = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index('ix_videos_status', 'status'),
+    )
 
 # Dependency
 def get_db():
@@ -352,28 +358,34 @@ def combine_videos(main_video: str, output_path: str, custom_bg_music: str = Non
     outro_file = OUTRO_VIDEO
     watermark_file = WATERMARK
 
-    # Function to scale video to 1920x1080
+    # Optimize scaling function
     def scale_video(input_file):
         return (
             ffmpeg.input(input_file)
-            .filter('scale', 1920, 1080)
-            .filter('setsar', 1)  # Set Sample Aspect Ratio to 1:1
+            .filter('scale', 1920, 1080, force_original_aspect_ratio='decrease')  # Maintain aspect ratio
+            .filter('pad', 1920, 1080, '(ow-iw)/2', '(oh-ih)/2')  # Center the video
+            .filter('setsar', 1)
         )
 
-    intro = scale_video(intro_file)
-    main = scale_video(main_file)
-    outro = scale_video(outro_file)
+    # Use multi-threading for video inputs
+    intro = scale_video(intro_file).filter('threads', 2)
+    main = scale_video(main_file).filter('threads', 2)
+    outro = scale_video(outro_file).filter('threads', 2)
     watermark = ffmpeg.input(watermark_file)
 
-    intro_duration = float(ffmpeg.probe(intro_file)['streams'][0]['duration'])
-    main_duration = float(ffmpeg.probe(main_file)['streams'][0]['duration'])
-    outro_duration = float(ffmpeg.probe(outro_file)['streams'][0]['duration'])
-    total_duration = intro_duration + main_duration + outro_duration
+    # Optimize duration calculations
+    def get_duration(file):
+        return float(ffmpeg.probe(file, v='error')['streams'][0]['duration'])
 
+    durations = [get_duration(f) for f in (intro_file, main_file, outro_file)]
+    intro_duration, main_duration, outro_duration = durations
+    total_duration = sum(durations)
+
+    # Optimize watermark application
     watermark_scaled = watermark.filter('scale', w=200, h=200)
-    main_with_watermark = ffmpeg.overlay(main, watermark_scaled, x=10, y=10)
+    main_with_watermark = ffmpeg.overlay(main, watermark_scaled, x=10, y=10, shortest=1)
 
-    fade_duration = 2
+    fade_duration = min(2, main_duration / 4)  # Ensure fade doesn't exceed 1/4 of main video
     main_with_fade = (
         main_with_watermark
         .filter('fade', type='in', duration=fade_duration)
@@ -382,37 +394,35 @@ def combine_videos(main_video: str, output_path: str, custom_bg_music: str = Non
 
     video = ffmpeg.concat(intro, main_with_fade, outro)
 
-    bg_music_files = []
-    current_duration = 0
-    fade_duration = 2
-    last_music_file = None
+    # Optimize background music selection
+    def get_music_segments(total_duration, custom_bg_music):
+        bg_music_files = []
+        current_duration = 0
+        while current_duration < total_duration:
+            if not bg_music_files and custom_bg_music:
+                music_file = custom_bg_music
+            else:
+                music_file = get_random_music(exclude=bg_music_files[-1][0] if bg_music_files else None)
+            
+            music_duration = min(get_duration(music_file), total_duration - current_duration)
+            bg_music_files.append((music_file, music_duration))
+            current_duration += music_duration
+        return bg_music_files
 
-    while current_duration < total_duration:
-        if not bg_music_files and custom_bg_music:
-            music_file = custom_bg_music
-        else:
-            music_file = get_random_music(exclude=last_music_file)
-        
-        music_duration = float(ffmpeg.probe(music_file)['streams'][0]['duration'])
-        
-        if current_duration + music_duration > total_duration:
-            music_duration = total_duration - current_duration
-        
-        bg_music_files.append((music_file, music_duration))
-        current_duration += music_duration
-        last_music_file = music_file
+    bg_music_files = get_music_segments(total_duration, custom_bg_music)
 
-    bg_music_tracks = []
-    for music_file, duration in bg_music_files:
+    # Optimize audio processing
+    def process_audio_segment(music_file, duration):
         bg_music = ffmpeg.input(music_file)
-        segment_fade_duration = min(fade_duration, duration / 2)
-        bg_music = (
+        fade_duration = min(2, duration / 4)
+        return (
             bg_music
             .filter('atrim', duration=duration)
-            .filter('afade', type='in', duration=segment_fade_duration)
-            .filter('afade', type='out', start_time=max(0, duration-segment_fade_duration), duration=segment_fade_duration)
+            .filter('afade', type='in', duration=fade_duration)
+            .filter('afade', type='out', start_time=max(0, duration-fade_duration), duration=fade_duration)
         )
-        bg_music_tracks.append(bg_music)
+
+    bg_music_tracks = [process_audio_segment(file, duration) for file, duration in bg_music_files]
 
     if bg_music_tracks:
         concatenated_bg_music = ffmpeg.concat(*bg_music_tracks, v=0, a=1)
@@ -420,23 +430,29 @@ def combine_videos(main_video: str, output_path: str, custom_bg_music: str = Non
     else:
         bg_music_adjusted = ffmpeg.input('anullsrc=r=44100:cl=stereo', f='lavfi', t=total_duration)
 
-    audio_inputs = []
-    for input_file in [intro_file, main_file, outro_file]:
-        audio_streams = ffmpeg.probe(input_file)['streams']
-        audio_stream = next((stream for stream in audio_streams if stream['codec_type'] == 'audio'), None)
-        
+    def get_audio_input(input_file):
+        probe = ffmpeg.probe(input_file, v='error')
+        audio_stream = next((stream for stream in probe['streams'] if stream['codec_type'] == 'audio'), None)
         if audio_stream:
-            audio_inputs.append(ffmpeg.input(input_file)['a'])
+            return ffmpeg.input(input_file)['a']
         else:
-            silent_duration = float(ffmpeg.probe(input_file)['streams'][0]['duration'])
-            silent_audio = ffmpeg.input('anullsrc=r=44100:cl=stereo', f='lavfi', t=silent_duration)
-            audio_inputs.append(silent_audio)
+            duration = float(probe['streams'][0]['duration'])
+            return ffmpeg.input('anullsrc=r=44100:cl=stereo', f='lavfi', t=duration)
 
+    audio_inputs = [get_audio_input(f) for f in (intro_file, main_file, outro_file)]
     original_audio = ffmpeg.concat(*audio_inputs, v=0, a=1)
 
     mixed_audio = ffmpeg.filter([original_audio, bg_music_adjusted], 'amix', inputs=2)
 
-    output = ffmpeg.output(video, mixed_audio, output_path, format='mp4')
+    output_params = {
+        'vcodec': 'h264_nvenc' if shutil.which('nvcc') else 'libx264',
+        'preset': 'veryfast',
+        'crf': '23',
+        'acodec': 'aac',
+        'audio_bitrate': '192k'
+    }
+
+    output = ffmpeg.output(video, mixed_audio, output_path, **output_params)
     
     try:
         ffmpeg.run(output, overwrite_output=True, capture_stdout=True, capture_stderr=True)
@@ -484,10 +500,9 @@ def adjust_aspect_ratio(input_path, output_path):
         .filter('pad', w=pad_width, h=pad_height, x='(ow-iw)/2', y='(oh-ih)/2')
     )
 
-    # Prepare the output stream
     output_params = {
-        'vcodec': 'libx264',
-        'preset': 'medium',
+        'vcodec': 'h264_nvenc' if shutil.which('nvcc') else 'libx264',
+        'preset': 'veryfast',
         'crf': '23',
         'acodec': 'aac',
     }
@@ -703,32 +718,6 @@ async def upload_video_chunk(
     else:
         return JSONResponse(content={"message": f"Chunk {chunk_number} of {total_chunks} received"})
 
-# Modify the existing /upload/ route to use the new chunk upload mechanism
-@app.post("/upload/")
-async def upload_video(
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
-    file: UploadFile = File(...),
-    account_name: str = Form(...),
-    game_mode: str = Form(...),
-    weapon: str = Form(...),
-    map_name: str = Form(...),
-    background_music: Union[UploadFile, str, None] = Form(default=None),
-):
-    # Use the chunk upload mechanism even for single file uploads
-    return await upload_chunk(
-        file=file,
-        chunk_number=1,
-        total_chunks=1,
-        filename=file.filename,
-        account_name=account_name,
-        game_mode=game_mode,
-        weapon=weapon,
-        map_name=map_name,
-        background_music=background_music,
-        db=db
-    )
-
 @app.get("/video/{video_id}/status")
 async def get_video_status(video_id: int, db: Session = Depends(get_db)):
     cached_status = redis_client.get(f"video:{video_id}:status")
@@ -863,8 +852,18 @@ async def health_check(db: Session = Depends(get_db)):
         health_status["status"] = "unhealthy"
         health_status["checks"]["redis"] = f"error: {str(e)}"
 
-    # For Render: Always return a 200 OK status
-    # Include detailed health information in the response body
+    # Check CPU usage
+    cpu_usage = psutil.cpu_percent()
+    health_status["checks"]["cpu_usage"] = f"{cpu_usage}%"
+    if cpu_usage > 80:
+        health_status["status"] = "unhealthy"
+
+    # Check memory usage
+    memory_usage = psutil.virtual_memory().percent
+    health_status["checks"]["memory_usage"] = f"{memory_usage}%"
+    if memory_usage > 80:
+        health_status["status"] = "unhealthy"
+
     return health_status
 
 @app.on_event("startup")
