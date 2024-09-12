@@ -204,11 +204,11 @@ def validate_file_integrity(file_path):
         if file_size == 0:
             raise ValueError("File is empty")
         
-        # Quick check for MP4 file signature
+        # Check for MP4 or MOV file signature
         with open(file_path, 'rb') as f:
             file_start = f.read(8)
-        if file_start[4:8] not in (b'ftyp', b'moov'):
-            raise ValueError("File does not appear to be a valid MP4")
+        if file_start[4:8] not in (b'ftyp', b'moov', b'mdat', b'free', b'wide'):
+            raise ValueError("File does not appear to be a valid MP4 or MOV")
         
         return True
     except Exception as e:
@@ -429,7 +429,7 @@ def process_video_background(filename: str, db: Session, video_id: int):
         # Check if custom background music was provided
         custom_bg_music = None
         if db_video.background_music:
-            custom_bg_music = os.path.join(MUSIC_DIR, db_video.background_music)
+            custom_bg_music = os.path.join(UPLOAD_DIR, db_video.background_music)
             if not os.path.exists(custom_bg_music):
                 print(f"Custom background music not found: {custom_bg_music}")
                 custom_bg_music = None
@@ -745,7 +745,9 @@ def generate_thumbnail(input_path, output_path):
 # New helper function for chunk uploads
 def save_upload_file_tmp(upload_file: UploadFile) -> str:
     try:
-        suffix = os.path.splitext(upload_file.filename)[1]
+        suffix = os.path.splitext(upload_file.filename)[1].lower()
+        if suffix not in ('.mp4', '.mov'):
+            raise ValueError("Unsupported file type. Only .mp4 and .mov files are allowed.")
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             shutil.copyfileobj(upload_file.file, tmp)
         return tmp.name
@@ -760,7 +762,7 @@ async def upload_music_chunk(
     filename: str = Form(...),
     db: Session = Depends(get_db)
 ):
-    chunk_dir = os.path.join(MUSIC_DIR, "chunks")
+    chunk_dir = os.path.join(UPLOAD_DIR, "music_chunks")
     os.makedirs(chunk_dir, exist_ok=True)
     
     if chunk_number == 1:
@@ -781,7 +783,7 @@ async def upload_music_chunk(
     
     if chunk_number == total_chunks:
         final_filename = unique_filename
-        final_path = os.path.join(MUSIC_DIR, final_filename)
+        final_path = os.path.join(UPLOAD_DIR, final_filename)
         
         with open(final_path, "wb") as final_file:
             for i in range(1, total_chunks + 1):
