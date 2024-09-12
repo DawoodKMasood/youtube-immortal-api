@@ -462,19 +462,19 @@ def process_video_background(filename: str, db: Session, video_id: int):
 
             #ImmortalsCOD #CallOfDutyMobile"""
 
-            youtube_video_id = upload_to_youtube(output_path, youtube_title, youtube_description)
+            # youtube_video_id = upload_to_youtube(output_path, youtube_title, youtube_description)
             
-            if youtube_video_id:
-                db_video.youtube_id = youtube_video_id
-                db_video.status = VideoStatus.UPLOADED_TO_YOUTUBE
-                db.commit()
+            # if youtube_video_id:
+            #     db_video.youtube_id = youtube_video_id
+            #     db_video.status = VideoStatus.UPLOADED_TO_YOUTUBE
+            #     db.commit()
                 
-                redis_client.setex(f"video:{video_id}:status", 3600, json.dumps({
-                    "status": VideoStatus.UPLOADED_TO_YOUTUBE,
-                    "youtube_id": youtube_video_id
-                }))
-            else:
-                print(f"Failed to upload video {video_id} to YouTube")
+            #     redis_client.setex(f"video:{video_id}:status", 3600, json.dumps({
+            #         "status": VideoStatus.UPLOADED_TO_YOUTUBE,
+            #         "youtube_id": youtube_video_id
+            #     }))
+            # else:
+            #     print(f"Failed to upload video {video_id} to YouTube")
 
         redis_client.setex(f"video:{video_id}:status", 3600, json.dumps({
             "status": VideoStatus.COMPLETED,
